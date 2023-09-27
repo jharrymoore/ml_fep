@@ -1,0 +1,7 @@
+slurm*.out
+*egg-info
+junk*
+input_files/*
+experiments
+replica_mixing
+*.svg
