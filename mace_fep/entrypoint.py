@@ -33,11 +33,10 @@ def main():
         replicas=args.replicas,
         ligA_idx=ligA_idx,
         ligB_idx=ligB_idx,
-        minimise=args.minimise,
     )
 
-
-
+    if args.minimise:
+        sampler.minimise()
     sampler.run()
 
 
