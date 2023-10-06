@@ -12,6 +12,7 @@ from mace.tools import torch_geometric, torch_tools, utils
 import torch
 import time
 import numpy as np
+from mace_fep.data import AtomicData
 from mace import data
 from mace.data import get_neighborhood
 
@@ -88,7 +89,7 @@ class FullCalcAbsoluteMACEFEPCalculator(Calculator):
             config = data.config_from_atoms(at)
             data_loader = torch_geometric.dataloader.DataLoader(
                 dataset=[
-                    data.AtomicData.from_config(
+                    AtomicData.from_config(
                         config, z_table=self.z_table, cutoff=self.r_max
                     )
                 ],
@@ -237,7 +238,7 @@ class FullCalcMACEFEPCalculator(Calculator):
             # this data is not going to change, other than the positions, cache the 
             data_loader = torch_geometric.dataloader.DataLoader(
                 dataset=[
-                    data.AtomicData.from_config(
+                    AtomicData.from_config(
                         config, z_table=self.z_table, cutoff=self.r_max, nl=nl
                     )
                 ],
