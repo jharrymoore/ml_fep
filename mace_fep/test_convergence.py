@@ -16,23 +16,20 @@ calc = MACEFEPCalculator(
 
 conf.set_calculator(calc)
 
-
 inter_forces = conf.get_potential_energy()
-
+print(inter_forces)
 
 # access the intra forces
-intra_forces = calc.inter_results["forces"]
+# intra_forces = calc.inter_results["forces"]
 
-
-node_energies = calc.inter_results["node_energies"]
-total_energies = calc.inter_results["energy"]
-
+# node_energies = calc.inter_results["node_energies"]
+# total_energies = calc.inter_results["energy"]
 
 # pickle the intra forces to disk
-import pickle
+# import pickle
 
-with open("inter_results.pkl", "wb") as f:
-    pickle.dump(calc.inter_results, f)
+# with open("inter_results.pkl", "wb") as f:
+#     pickle.dump(calc.inter_results, f)
 
 
 # print(len(intra_forces))

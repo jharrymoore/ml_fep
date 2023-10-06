@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import timeit
 from typing import List
 from ase import Atoms
 
@@ -8,16 +9,25 @@ import numpy as np
 import netCDF4
 from pydantic import BaseModel
 from ase.io import read
-from mace_fep.replica_exchange.fep_calculator import MACEFEPCalculator
+from sympy import true
+from mace_fep.replica_exchange.fep_calculator import (
+    AbsoluteMACEFEPCalculator,
+    FullCalcAbsoluteMACEFEPCalculator,
+    FullCalcMACEFEPCalculator,
+    MACEFEPCalculator,
+)
+from mace_fep.utils import timeit
 from ase.md.langevin import Langevin
 from ase import units
 from ase.optimize import LBFGS
+from ase.constraints import FixBondLength
 import mpiplus
 
 
 # TODO: I absolutely do not like that the atoms object is being quietly updated by ase under the hood, it is impossible to track what is happening here
 # This is why we invented functional programming...
 logger = logging.getLogger("mace_fep")
+# set logging level
 
 
 class System:
@@ -52,12 +62,12 @@ class System:
                 parallel=False,
             )
 
-        self.integrator.attach(write_frame, interval=10)
+        self.integrator.attach(write_frame, interval=100)
 
     def propagate(self, steps: int) -> None:
         self.integrator.run(steps)
 
-    def minimise(self, tol=1e-2):
+    def minimise(self, tol=0.2):
         minimiser = LBFGS(self.atoms)
         minimiser.run(fmax=tol)
 
@@ -74,6 +84,7 @@ class ReplicaExchange:
     systems: List[System]
     energies_last_iteration: np.ndarray
     reporter: netCDF4.Dataset
+    restart: bool
 
     def __init__(
         self,
@@ -85,30 +96,43 @@ class ReplicaExchange:
         replicas: int,
         ligA_idx: List[int],
         ligB_idx: List,
+        restart: bool,
         minimise: bool = False,
     ) -> None:
-        # initi
         self.mace_model = mace_model
         self.ligA_idx = ligA_idx
         self.ligB_idx = ligB_idx
         self.iters = iters
+        self.replicas = replicas
         self.output_dir = output_dir
         self.steps_per_iter = steps_per_iter
         self._current_iter = 0
         self._iter_time = 0.0
         # these will get updated at each iteration
         self.atoms = [read(xyz_file) for _ in range(replicas)]
+        ligA_oxygen_idx = [i for i in ligA_idx if self.atoms[0][i].symbol == "O"][0]
+        # find the oxygen atom in ligand B
+        ligB_oxygen_idx = [i for i in ligB_idx if self.atoms[0][i].symbol == "O"][0]
+
+        for at in self.atoms:
+            c = FixBondLength(ligA_oxygen_idx, ligB_oxygen_idx)
+            at.set_constraint(c)
+
         self.lmbdas = np.linspace(0, 1, replicas)
         logger.info("Initialising systems")
         self.systems = self._initialise_systems(
             self.lmbdas, self.atoms, self.output_dir
         )
-        if minimise:
-            logger.info("Minimising replicas")
-            self.minimise_replicas()
+        if restart:
+            try:
+                self._restart_from_latest()
+            except OSError as e:
+                logger.error(f"Could not restart from latest: {e}")
+                self._initialise_storage_file(output_dir)
 
         # initialise the netcdf storage file
-        self._initialise_storage_file(output_dir)
+        else:
+            self._initialise_storage_file(output_dir)
 
     def _initialise_systems(
         self, lambdas: np.ndarray, atoms: List[Atoms], output_dir: str
@@ -117,7 +141,7 @@ class ReplicaExchange:
         # attach a calculator to each atoms object, with a different lambda
         for idx, (lmbda, atoms) in enumerate(zip(lambdas, self.atoms)):
             atoms.set_calculator(
-                MACEFEPCalculator(
+                FullCalcMACEFEPCalculator(
                     model_path=self.mace_model,
                     lmbda=lmbda,
                     stateA_idx=self.ligA_idx,
@@ -125,46 +149,64 @@ class ReplicaExchange:
                     device="cuda",
                 )
             )
-            # now create the system for each atoms object
             # TODO: parametrise integrator kwargs
             systems.append(
                 System(atoms=atoms, lmbda=lmbda, idx=idx, output_dir=output_dir)
             )
-
         return systems
+
+    def _restart_from_latest(self):
+        # take the positions from the netcdf file, TODO: reload the lambda positions once the replica mixing works
+        # open the netcdf file for reading
+
+        self.reporter = netCDF4.Dataset(os.path.join(self.output_dir, "repex.nc"), "r")
+        # get the positions from the last iteration
+        n_steps = self.reporter.dimensions["iteration"].size
+        logger.info(f"Restarting from iteration {n_steps}")
+        coords = self.reporter.variables["positions"][-1]
+        # set the positions of the atoms objects
+        for idx, replica in enumerate(self.systems):
+            replica.atoms.set_positions(coords[idx])
+
+        # close the netcdf file
+        self.reporter.close()
 
     def run(self) -> None:
         if self._current_iter == 0:
             # get the initial energies
+            logger.info("Computing inintial energies")
             self.compute_energies()
             self.report_iteration()
-
         # main loop of replica exchange
         while self._current_iter < self.iters:
-            t1 = time.time()
             self._current_iter += 1
             logger.info(f"Running iteration {self._current_iter} of replica exchange")
-            # note that at the moment this does nothing
+
+            t1 = time.time()
             self.mix_replicas()
+            t2 = time.time()
+            logger.info(f"Replica mixing took {t2-t1:.4f} seconds")
 
+            t1 = time.time()
             self.propagate_replicas()
-
+            t2 = time.time()
+            logger.info(f"Propagated {self.replicas} replicas for {self.steps_per_iter} steps in {t2-t1:.4f} seconds")
             self.compute_energies()
             self._iter_time = time.time() - t1
 
             self.report_iteration()
+
+            # check for nan values in coords
+            coords = self.reporter.variables["positions"][self._current_iter]
+            if np.isnan(coords).any():
+                logger.error("NaN values in coordinates, exiting")
+                break
 
         # finally close the netcdf file
         self.reporter.close()
 
     def propagate_replicas(self) -> None:
         # run the mace FEP calculator for each replica, each on a separate MPI rank
-
-        # in serial for now, althouth this function should distribute the replica computations over MPI ranks
-        # for system in self.systems:
-        #     logger.debug("Propagating replica with lambda = {}".format(system.lmbda))
-        #     # this is all stateful, the atoms object has stuff updated in place.
-        #     system.propagate(self.steps_per_iter)
         mpiplus.distribute(self._propagate_replica, range(len(self.lmbdas)))
 
     def _propagate_replica(self, idx) -> None:
@@ -183,6 +225,7 @@ class ReplicaExchange:
             for jdx, lmbda in enumerate(self.lmbdas):
                 replica.atoms.calc.set_lambda(lmbda)
                 all_energies[idx, jdx] = replica.atoms.get_potential_energy()
+            replica.atoms.calc.reset_lambda()
 
         self.energies_last_iteration = all_energies
 
@@ -193,6 +236,15 @@ class ReplicaExchange:
             self._current_iter
         ] = self.energies_last_iteration
         self.reporter.variables["iter_time"][self._current_iter] = self._iter_time
+
+        # strip the coordinates out of the atoms object
+        # coords of shape [system_idx, atoms, 3]
+        coords = np.zeros([len(self.systems), len(self.atoms[0]), 3])
+        for idx, replica in enumerate(self.systems):
+            coords[idx] = replica.atoms.get_positions()
+        self.reporter.variables["positions"][self._current_iter] = coords
+
+        # get the
 
         # flush to disk
         self.reporter.sync()
@@ -208,13 +260,66 @@ class ReplicaExchange:
         self.reporter.createDimension("lambda", len(self.lmbdas))
         self.reporter.createDimension("replica", len(self.systems))
         self.reporter.createDimension("iter_time", None)
+        self.reporter.createDimension("n_atoms", len(self.atoms[0]))
+        self.reporter.createDimension("n_dims", 3)
 
         self.reporter.createVariable("u_kln", "f8", ("iteration", "replica", "lambda"))
         self.reporter.createVariable("iter_time", "f8", ("iteration",))
+        self.reporter.createVariable(
+            "positions", "f8", ("iteration", "replica", "n_atoms", "n_dims")
+        )
 
     def mix_replicas(self) -> None:
         # pass the arrays to the rust module to perform the mixing
-        pass
+        # this is the complex bit: we attempt something like n^3 swaps for n replicas, 
+        # TODO: this should be a compiled rust module - I don't want to introduce a numba dependency
+
+        n_swap_attempts = self.replicas ** 3
+        n_successful_swaps = 0
+
+
+        for _ in range(n_swap_attempts):
+            replica_i = np.random.randint(0, self.replicas)
+            replica_j = np.random.randint(0, self.replicas)
+
+            # attempt the swap
+            result = self._attempt_swap(replica_i, replica_j)
+            if result:
+                n_successful_swaps += 1
+
+        logger.info(f"Attempted {n_swap_attempts} swaps, {n_successful_swaps} were successful")
+
+
+    def _attempt_swap(self, replica_i: int, replica_j: int) -> bool:
+        # get the thermodunamic state of the replica
+        # get the energyes if ij, ji, ii and jj
+
+        # extract the energies that have just been saved
+        u_ij = self.energies_last_iteration[replica_i, replica_j]
+        u_ji = self.energies_last_iteration[replica_j, replica_i]
+        u_ii = self.energies_last_iteration[replica_i, replica_i]
+        u_jj = self.energies_last_iteration[replica_j, replica_j]
+
+        logger.debug("u_ij", u_ij)
+        logger.debug("u_ji", u_ji)
+        logger.debug("u_ii", u_ii)
+        logger.debug("u_jj", u_jj)
+
+
+        # logP = 0 if the replicas if we end up with the same i and j
+        log_p = -(u_ij+ u_ji) + u_ii + u_jj
+        logger.debug("logP", log_p)
+        # 
+        if log_p > 0 or np.random.random() < np.exp(log_p):
+            # swap the replicas
+            lambda_i = self.systems[replica_i].lmbda
+            lambda_j = self.systems[replica_j].lmbda
+            self.systems[replica_i].lmbda = lambda_j
+            self.systems[replica_j].lmbda = lambda_i
+            return true
+        else:
+            return False
+
 
     def minimise(self):
         for system in self.systems:

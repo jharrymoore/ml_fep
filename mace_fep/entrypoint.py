@@ -2,9 +2,14 @@ import argparse
 
 from mace_fep.replica_exchange.replica_exchange import ReplicaExchange
 import logging
+import os
 
-logger = logging.getLogger("mace_fep")
-logger.setLevel(logging.INFO)
+log_level = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+}
 
 
 def main():
@@ -18,21 +23,31 @@ def main():
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("-o", "--output", type=str, default="junk")
     parser.add_argument("--minimise", action="store_true")
-    # parser.add_argument("--idx", type=int, nargs="+")
+    parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--log_level", type=str, default="INFO")
     args = parser.parse_args()
+    logger = logging.getLogger("mace_fep")
+    logger.setLevel(log_level[args.log_level])
+    # parser.add_argument("--idx", type=int, nargs="+")
 
     ligA_idx = [i for i in range(0, 6)]
     ligB_idx = [i for i in range(6, 15)]
+    # ligB_idx = []
+
+    # make the output dir if it doesn't exist
+    if not os.path.exists(args.output):
+        os.makedirs(args.output, exist_ok=True)
 
     sampler = ReplicaExchange(
         mace_model=args.model_path,
-        storage_file=args.output,
+        output_dir=args.output,
         iters=args.iters,
         steps_per_iter=args.steps_per_iter,
         xyz_file=args.file,
         replicas=args.replicas,
         ligA_idx=ligA_idx,
         ligB_idx=ligB_idx,
+        restart=args.restart,
     )
 
     if args.minimise:

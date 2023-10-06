@@ -12,7 +12,6 @@ from ase.md.langevin import Langevin
 from mace_fep.replica_exchange.fep_calculator import MACEFEPCalculator
 
 
-
 logger = logging.getLogger()
 
 # pure MACE implementation of free energy perturbation, first to run solvation free energy calculations
@@ -118,7 +117,6 @@ def main():
         os.mkdir(args.output)
     else:
         os.makedirs(args.output, exist_ok=True)
-
 
 
 if __name__ == "__main__":
