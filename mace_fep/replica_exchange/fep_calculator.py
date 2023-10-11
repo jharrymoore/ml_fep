@@ -228,7 +228,7 @@ class FullCalcMACEFEPCalculator(Calculator):
                 edge_index, shifts, unit_shifts = self.nl_cache[idx]
                 nl = (edge_index, shifts, unit_shifts)
             else:
-                logger.debug("Updating neighbourlist at step %d" % self.step_counter)
+                # logger.debug("Updating neighbourlist at step %d" % self.step_counter)
                 nl = get_neighborhood(
                     positions=config.positions, cutoff=self.r_max, pbc=config.pbc, cell=config.cell
                 )

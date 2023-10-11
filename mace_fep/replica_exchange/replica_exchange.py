@@ -16,12 +16,14 @@ from mace_fep.replica_exchange.fep_calculator import (
     FullCalcMACEFEPCalculator,
     MACEFEPCalculator,
 )
-from mace_fep.utils import timeit
+# from mace_fep.utils import timeit
 from ase.md.langevin import Langevin
 from ase import units
 from ase.optimize import LBFGS
-from ase.constraints import FixBondLength
+from ase.constraints import FixAtoms
 import mpiplus
+
+from mace_fep.utils import with_timer
 
 
 # TODO: I absolutely do not like that the atoms object is being quietly updated by ase under the hood, it is impossible to track what is happening here
@@ -112,11 +114,13 @@ class ReplicaExchange:
         self.atoms = [read(xyz_file) for _ in range(replicas)]
         ligA_oxygen_idx = [i for i in ligA_idx if self.atoms[0][i].symbol == "O"][0]
         # find the oxygen atom in ligand B
-        ligB_oxygen_idx = [i for i in ligB_idx if self.atoms[0][i].symbol == "O"][0]
+        ligB_oxygen_idx = [i for i in ligB_idx if self.atoms[0][i].symbol == "N"][0]
 
-        for at in self.atoms:
-            c = FixBondLength(ligA_oxygen_idx, ligB_oxygen_idx)
-            at.set_constraint(c)
+        c = FixAtoms(indices=[ligA_oxygen_idx, ligB_oxygen_idx])
+        for atoms in self.atoms:
+            atoms.set_constraint(c)
+
+
 
         self.lmbdas = np.linspace(0, 1, replicas)
         logger.info("Initialising systems")
@@ -155,11 +159,12 @@ class ReplicaExchange:
             )
         return systems
 
+    @mpiplus.on_single_node(0, broadcast_result=False, sync_nodes=False)
     def _restart_from_latest(self):
         # take the positions from the netcdf file, TODO: reload the lambda positions once the replica mixing works
         # open the netcdf file for reading
 
-        self.reporter = netCDF4.Dataset(os.path.join(self.output_dir, "repex.nc"), "r")
+        self.reporter = netCDF4.Dataset(os.path.join(self.output_dir, "repex.nc"), "r+")
         # get the positions from the last iteration
         n_steps = self.reporter.dimensions["iteration"].size
         logger.info(f"Restarting from iteration {n_steps}")
@@ -169,7 +174,7 @@ class ReplicaExchange:
             replica.atoms.set_positions(coords[idx])
 
         # close the netcdf file
-        self.reporter.close()
+        # self.reporter.close()
 
     def run(self) -> None:
         if self._current_iter == 0:
@@ -179,13 +184,11 @@ class ReplicaExchange:
             self.report_iteration()
         # main loop of replica exchange
         while self._current_iter < self.iters:
-            self._current_iter += 1
             logger.info(f"Running iteration {self._current_iter} of replica exchange")
 
             t1 = time.time()
             self.mix_replicas()
             t2 = time.time()
-            logger.info(f"Replica mixing took {t2-t1:.4f} seconds")
 
             t1 = time.time()
             self.propagate_replicas()
@@ -196,25 +199,47 @@ class ReplicaExchange:
 
             self.report_iteration()
 
+            # TODO: the reporter update is not working with MPI at the moment
+
             # check for nan values in coords
-            coords = self.reporter.variables["positions"][self._current_iter]
-            if np.isnan(coords).any():
-                logger.error("NaN values in coordinates, exiting")
-                break
+            # print(self._current_iter)
+            # print(self.reporter.variables["positions"].shape)
+            # coords = self.reporter.variables["positions"][self._current_iter]
+            self._current_iter += 1
+            # if np.isnan(coords).any():
+            #     logger.error("NaN values in coordinates, exiting")
+            #     break
 
         # finally close the netcdf file
         self.reporter.close()
 
     def propagate_replicas(self) -> None:
         # run the mace FEP calculator for each replica, each on a separate MPI rank
-        mpiplus.distribute(self._propagate_replica, range(len(self.lmbdas)))
+        positions = mpiplus.distribute(self._propagate_replica, range(len(self.lmbdas)), send_results_to='all', sync_nodes=True)
 
-    def _propagate_replica(self, idx) -> None:
+        logger.debug(positions)
+
+        # set the new positions
+        for idx, replica in enumerate(self.systems):
+            replica.atoms.set_positions(positions[idx])
+
+        for idx in range(len(self.lmbdas)):
+            logger.debug(f"system {idx} positions after propagation: {self.systems[idx].atoms.get_positions()[0]}")
+
+    def _propagate_replica(self, idx) -> np.array:
         system = self.systems[idx]
-        logger.debug("Propagating replica with lambda = {}".format(system.lmbda))
+        # print first row of positions before and after
+        # logger.debug(f"system {idx} positions before propagation: {system.atoms.get_positions()[0]}")
+        logger.debug(f"Propagating replica with lambda = {system.lmbda:.2f}")
         # this is all stateful, the atoms object has stuff updated in place.
         system.propagate(self.steps_per_iter)
+        # how does the memory model
+        logger.debug(f"system {idx} positions after propagation: {system.atoms.get_positions()[0]}")
 
+        # return the positions
+        return system.atoms.get_positions()
+
+    @mpiplus.on_single_node(0, broadcast_result=True)
     def compute_energies(self) -> None:
         # extract energies from each replica - get this from the atoms object
         all_energies = np.zeros([len(self.systems), len(self.lmbdas)])
@@ -225,10 +250,13 @@ class ReplicaExchange:
             for jdx, lmbda in enumerate(self.lmbdas):
                 replica.atoms.calc.set_lambda(lmbda)
                 all_energies[idx, jdx] = replica.atoms.get_potential_energy()
+                logger.debug(f"Energy of replica {idx:.2f} with lambda {lmbda:.2f} at iteration {self._current_iter} is {all_energies[idx, jdx]}")
             replica.atoms.calc.reset_lambda()
-
+        logger.debug(all_energies)
         self.energies_last_iteration = all_energies
 
+    @mpiplus.on_single_node(0, broadcast_result=False, sync_nodes=False)
+    @mpiplus.delayed_termination
     def report_iteration(self) -> None:
         # write the arrays to the prepared netcdf file
         logger.debug("Writing iteration {} to file".format(self._current_iter))
@@ -244,15 +272,16 @@ class ReplicaExchange:
             coords[idx] = replica.atoms.get_positions()
         self.reporter.variables["positions"][self._current_iter] = coords
 
-        # get the
 
-        # flush to disk
         self.reporter.sync()
 
+    # do the IO from the root node, otherwise we're going to do a lot of overwriting
+    @mpiplus.on_single_node(0, broadcast_result=False, sync_nodes=False)
     def _initialise_storage_file(self, output_dir: str) -> netCDF4.Dataset:
         # create a netcdf file to store the arrays
 
         # create the netcdf file
+        logger.info(f"Initialising netcdf file in {output_dir}")
         self.reporter = netCDF4.Dataset(os.path.join(output_dir, "repex.nc"), "w")
 
         # create the dimensions
@@ -269,6 +298,8 @@ class ReplicaExchange:
             "positions", "f8", ("iteration", "replica", "n_atoms", "n_dims")
         )
 
+    @mpiplus.on_single_node(0, broadcast_result=True)
+    @with_timer("Mixing replicas")
     def mix_replicas(self) -> None:
         # pass the arrays to the rust module to perform the mixing
         # this is the complex bit: we attempt something like n^3 swaps for n replicas, 
@@ -287,7 +318,11 @@ class ReplicaExchange:
             if result:
                 n_successful_swaps += 1
 
-        logger.info(f"Attempted {n_swap_attempts} swaps, {n_successful_swaps} were successful")
+
+        # get the mpi rank of the current node
+        # rank = mpiplus.get_rank()
+
+        logger.info(f" Attempted {n_swap_attempts} swaps, {n_successful_swaps} were successful")
 
 
     def _attempt_swap(self, replica_i: int, replica_j: int) -> bool:
@@ -300,15 +335,15 @@ class ReplicaExchange:
         u_ii = self.energies_last_iteration[replica_i, replica_i]
         u_jj = self.energies_last_iteration[replica_j, replica_j]
 
-        logger.debug("u_ij", u_ij)
-        logger.debug("u_ji", u_ji)
-        logger.debug("u_ii", u_ii)
-        logger.debug("u_jj", u_jj)
+        # logger.debug("u_ij:  {u_ij)
+        # logger.debug("u_ji", u_ji)
+        # logger.debug("u_ii", u_ii)
+        # logger.debug("u_jj", u_jj)
 
 
         # logP = 0 if the replicas if we end up with the same i and j
         log_p = -(u_ij+ u_ji) + u_ii + u_jj
-        logger.debug("logP", log_p)
+        # logger.debug(f"logP: {log_p}")
         # 
         if log_p > 0 or np.random.random() < np.exp(log_p):
             # swap the replicas

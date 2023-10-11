@@ -30,8 +30,8 @@ def main():
     logger.setLevel(log_level[args.log_level])
     # parser.add_argument("--idx", type=int, nargs="+")
 
-    ligA_idx = [i for i in range(0, 6)]
-    ligB_idx = [i for i in range(6, 15)]
+    ligA_idx = [i for i in range(0, 3)]
+    ligB_idx = [i for i in range(3, 7)]
     # ligB_idx = []
 
     # make the output dir if it doesn't exist
