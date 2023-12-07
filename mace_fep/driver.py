@@ -109,6 +109,7 @@ def main():
     parser.add_argument("-o", "--output", type=str, default="junk")
     parser.add_argument("--mpi", action="store_true")
     parser.add_argument("-c", "--clobber", action="store_true")
+    parser.add_argument("--mode", type=str, deafult="relative", choices=["relative", "absolute"])
     # parser.add_argument("--idx", type=int, nargs="+")
     args = parser.parse_args()
 

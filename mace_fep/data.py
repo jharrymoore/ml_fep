@@ -109,9 +109,12 @@ class AtomicData(torch_geometric.data.Data):
 
     @classmethod
     def from_config(
-        cls, config: Configuration, z_table: AtomicNumberTable, cutoff: float, nl: Optional[Tuple[np.array, np.array, np.array]]
+        cls,
+        config: Configuration,
+        z_table: AtomicNumberTable,
+        cutoff: float,
+        nl: Optional[Tuple[np.array, np.array, np.array]],
     ) -> "AtomicData":
-        
         # checku whether the nl values have been provided already
 
         edge_index, shifts, unit_shifts = nl

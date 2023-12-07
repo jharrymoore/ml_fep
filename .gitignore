@@ -7,3 +7,6 @@ experiments
 notebooks
 replica_mixing
 *.svg
+mm_calculations/
+*.sh
+*.ipynb

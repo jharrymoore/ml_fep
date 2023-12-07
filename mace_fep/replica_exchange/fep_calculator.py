@@ -15,6 +15,7 @@ import numpy as np
 from mace_fep.data import AtomicData
 from mace import data
 from mace.data import get_neighborhood
+from copy import deepcopy
 
 logger = logging.getLogger("mace_fep")
 
@@ -39,8 +40,7 @@ class FullCalcAbsoluteMACEFEPCalculator(Calculator):
         # cutoff around the solute where there is a significant change to the
         cutoff_radius: float = 5.0,
         default_dtype="float64",
-        **kwargs,
-    ):
+        **kwargs):
         Calculator.__init__(self, **kwargs)
         self.results = {}
         self.cutoff_radius = cutoff_radius
@@ -59,6 +59,8 @@ class FullCalcAbsoluteMACEFEPCalculator(Calculator):
             [int(z) for z in self.model.atomic_numbers]
         )
         torch_tools.set_default_dtype(default_dtype)
+        self.step_counter = 0
+        self.nl_cache = {}
 
     # pylint: disable=dangerous-default-value
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
@@ -69,8 +71,6 @@ class FullCalcAbsoluteMACEFEPCalculator(Calculator):
         :param system_changes: [str], system changes since last calculation, used by ASE internally
         :return:
         """
-        t1 = time.time()
-
         solvent_idx = [i for i in range(len(atoms)) if i not in self.stateA_idx]
         solvent_atoms = atoms[solvent_idx]
         stateA_solute = atoms[self.stateA_idx]
@@ -87,10 +87,27 @@ class FullCalcAbsoluteMACEFEPCalculator(Calculator):
 
             # prepare data
             config = data.config_from_atoms(at)
+
+            self.step_counter += 1
+
+            config = data.config_from_atoms(at)
+            # extract the neighbourlist from cache, unless we're every N steps, in which case update it
+            if self.step_counter % 20 != 0 and idx in self.nl_cache.keys():
+                edge_index, shifts, unit_shifts = self.nl_cache[idx]
+                nl = (edge_index, shifts, unit_shifts)
+            else:
+                # logger.debug("Updating neighbourlist at step %d" % self.step_counter)
+                nl = get_neighborhood(
+                    positions=config.positions,
+                    cutoff=self.r_max,
+                    pbc=config.pbc,
+                    cell=config.cell,
+                )
+                self.nl_cache[idx] = nl
             data_loader = torch_geometric.dataloader.DataLoader(
                 dataset=[
                     AtomicData.from_config(
-                        config, z_table=self.z_table, cutoff=self.r_max
+                        config, z_table=self.z_table, cutoff=self.r_max, nl=nl
                     )
                 ],
                 batch_size=1,
@@ -132,16 +149,21 @@ class FullCalcAbsoluteMACEFEPCalculator(Calculator):
             "forces": final_forces,
         }
         t2 = time.time()
-        logger.debug(f"Time taken for calculation: {t2-t1}")
+        # logger.debug(f"Time taken for calculation: {t2-t1}")
         # get the final forces acting on the solute
 
     def set_lambda(self, lmbda: float) -> None:
         # Not thrilled about this, this allows us to change the value and run get_potential_energy.  I would love to be able to add a trait to say get_potential_energy_at_lambda but I would need to modify atoms.
-        logger.debug(f"Setting lambda to {lmbda}, from {self.lmbda}")
+        # logger.debug(f"Setting lambda to {lmbda:.2f}, from {self.lmbda:.2f}")
         self.lmbda = lmbda
 
+    def get_lambda(self) -> float:
+        return self.lmbda
+
+    
+
     def reset_lambda(self) -> None:
-        logger.debug(f"Resetting lambda to {self.original_lambda}")
+        logger.debug(f"Resetting lambda to {self.original_lambda:.2f}")
         self.lmbda = self.original_lambda
 
 
@@ -188,6 +210,7 @@ class FullCalcMACEFEPCalculator(Calculator):
 
         # cache of atoms MACE data objects - positions tensors need updating, nothing else will be changing on short timescales, so we don't need a new neighbour list every time
         self.nl_cache = {}
+
     # pylint: disable=dangerous-default-value
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
         """
@@ -197,12 +220,15 @@ class FullCalcMACEFEPCalculator(Calculator):
         :param system_changes: [str], system changes since last calculation, used by ASE internally
         :return:
         """
-        t1 = time.time()
 
         # solvent atoms indexed in the main atoms reference frame
         solvent_idx = [
             i for i in range(len(atoms)) if i not in self.stateA_idx + self.stateB_idx
         ]
+
+        # TODO: doing these copy ops is expensive, really we just want to cache these in the calculator, and update the positions only
+        # can we get away with not making copies of the system at each step? we want to compute properties on the same atoms, but maybe call them different things? 
+
         solvent_atoms = atoms[solvent_idx]
         stateA_solute = atoms[self.stateA_idx]
         stateA = stateA_solute + solvent_atoms
@@ -213,29 +239,31 @@ class FullCalcMACEFEPCalculator(Calculator):
             stateA_solute,
             stateB,
             stateB_solute,
-            solvent_atoms,
+            # solvent_atoms,
         ]
 
         for idx, at in enumerate(all_atoms):
             # call to base-class to set atoms attribute
             Calculator.calculate(self, at)
-            # iterate the step counter 
+            # iterate the step counter
             self.step_counter += 1
 
             config = data.config_from_atoms(at)
             # extract the neighbourlist from cache, unless we're every N steps, in which case update it
-            if self.step_counter % 100 != 0 and idx in self.nl_cache.keys():
+            if self.step_counter % 20 != 0 and idx in self.nl_cache.keys():
                 edge_index, shifts, unit_shifts = self.nl_cache[idx]
                 nl = (edge_index, shifts, unit_shifts)
             else:
                 # logger.debug("Updating neighbourlist at step %d" % self.step_counter)
                 nl = get_neighborhood(
-                    positions=config.positions, cutoff=self.r_max, pbc=config.pbc, cell=config.cell
+                    positions=config.positions,
+                    cutoff=self.r_max,
+                    pbc=config.pbc,
+                    cell=config.cell,
                 )
                 self.nl_cache[idx] = nl
 
-
-            # this data is not going to change, other than the positions, cache the 
+            # this data is not going to change, other than the positions, cache the
             data_loader = torch_geometric.dataloader.DataLoader(
                 dataset=[
                     AtomicData.from_config(
@@ -263,47 +291,41 @@ class FullCalcMACEFEPCalculator(Calculator):
 
         final_forces = np.zeros((len(atoms), 3))
 
-        # add the forces component-wise: isolated + \lambda * interaction(A) + (1-\lambda) * interaction(B)
-        final_forces[self.stateA_idx] = stateA_solute.arrays["forces"] + self.lmbda * (
-            stateA.arrays["forces"][:len(self.stateA_idx)] - stateA_solute.arrays["forces"]
+        final_forces[self.stateA_idx] = (
+            self.lmbda * stateA.arrays["forces"][:len(self.stateA_idx)]
+            + (1 - self.lmbda) * stateA_solute.arrays["forces"]
         )
 
-        final_forces[self.stateB_idx] = stateB_solute.arrays["forces"] + (
+        final_forces[self.stateB_idx] = self.lmbda * stateB_solute.arrays["forces"] + (
             1 - self.lmbda
-        ) * (stateB.arrays["forces"][:len(self.stateB_idx)] - stateB_solute.arrays["forces"])
+        ) * (stateB.arrays["forces"][:len(self.stateB_idx)])
 
-        # now the solute + isolated term + 
-        final_forces[solvent_idx] = (
-            solvent_atoms.arrays["forces"]
-            + self.lmbda * (stateA.arrays["forces"][len(self.stateA_idx):] - solvent_atoms.arrays["forces"])
-            + (1 - self.lmbda)
-            * (stateB.arrays["forces"][len(self.stateB_idx):] - solvent_atoms.arrays["forces"])
-        )
-
+        # now the solute + isolated term +
+        final_forces[solvent_idx] = self.lmbda * (
+            stateA.arrays["forces"][len(self.stateA_idx) :]
+        ) + (1 - self.lmbda) * (stateB.arrays["forces"][len(self.stateB_idx) :])
 
         # energy expression: isolated + \lambda * interaction(A) + (1-\lambda) * interaction(B)
-        energy = self.lmbda * stateA.info["energy"] + (1 - self.lmbda) * stateB.info["energy"] + self.lmbda * (
-            stateB_solute.info["energy"] + (1 - self.lmbda) * stateA_solute.info["energy"]
-        )
-
-       
+        energy = self.lmbda * (stateA.info["energy"] + stateB_solute.info["energy"]) + (
+            1 - self.lmbda
+        ) * (stateB.info["energy"] + stateA_solute.info["energy"])
 
         self.results = {
             "energy": energy,
             "free_energy": energy,
             "forces": final_forces,
         }
-        t2 = time.time()
-        # logger.debug(f"Time taken for calculation: {t2-t1}")
-        # get the final forces acting on the solute
 
     def set_lambda(self, lmbda: float) -> None:
         # Not thrilled about this, this allows us to change the value and run get_potential_energy.  I would love to be able to add a trait to say get_potential_energy_at_lambda but I would need to modify atoms.
-        logger.debug(f"Setting lambda to {lmbda}, from {self.lmbda}")
+        logger.debug(f"Setting lambda to {lmbda:.2f}, from {self.lmbda:.2f}")
         self.lmbda = lmbda
+    
+    def get_lambda(self) -> float:
+        return self.lmbda
 
     def reset_lambda(self) -> None:
-        logger.debug(f"Resetting lambda to {self.original_lambda}")
+        logger.debug(f"Resetting lambda to {self.original_lambda:.2f}")
         self.lmbda = self.original_lambda
 
 
@@ -605,7 +627,6 @@ class MACEFEPCalculator(Calculator):
         # print(final_forces[self.stateA_idx + list(itemgetter(*solvation_shell_idx)(itemgetter(*solvent_idx)(full_atoms_idx))) + outer_solvent_idx].shape)
 
         # forces on the solvent due to INTERACTION with ligand A
-        print(self.stateA_idx)
         # select all indices in stateA that are not the ligand
         # this indexing works becase we construct the stateA/B objects by concatenation of existing atoms, preserving atom ordering
         # solvent_stateA_interaction_force = stateA.arrays["forces"][len(self.stateA_idx):] - solvent_atoms.arrays["forces"]
@@ -833,15 +854,6 @@ class AbsoluteMACEFEPCalculator(Calculator):
         """
         t1 = time.time()
 
-        # self.neighbourList = neighborlist.NeighborList(
-        #     bothways=True,
-        #     cutoffs=neighborlist.natural_cutoffs(atoms),
-        # )
-        # self.neighbourList.update(atoms)
-        # solvent is a huge number of atoms, most of which do not experience any change in their interactions due to the removal of the ligand, since they are so distant.  We should compute forces for a subset of atoms that are close to the solvent, and use the full system forces for everything else.
-
-        # compute geometric center of core atoms
-        # full_atoms_idx = [i for i in range(len(atoms))]
         ligand_center = np.mean(atoms[self.stateA_idx].positions, axis=0)
 
         solvent_idx = [i for i in range(len(atoms)) if i not in self.stateA_idx]

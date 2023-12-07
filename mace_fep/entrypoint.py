@@ -1,8 +1,11 @@
 import argparse
+from mace_fep.replica_exchange.fep_calculator import AbsoluteMACEFEPCalculator, FullCalcAbsoluteMACEFEPCalculator, FullCalcMACEFEPCalculator
 
 from mace_fep.replica_exchange.replica_exchange import ReplicaExchange
 import logging
 import os
+from mace.tools import set_default_dtype
+import mpiplus
 
 log_level = {
     "DEBUG": logging.DEBUG,
@@ -10,6 +13,12 @@ log_level = {
     "WARNING": logging.WARNING,
     "ERROR": logging.ERROR,
 }
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)-8s %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S')
+
 
 
 def main():
@@ -25,18 +34,41 @@ def main():
     parser.add_argument("--minimise", action="store_true")
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--log_level", type=str, default="INFO")
+    parser.add_argument("--ligA_idx", type=int, help="open interval [0, ligA_idx) selects the ligand atoms for ligA", default=None)
+    parser.add_argument("--ligB_idx", type=int, help="open interval [ligA_idx, ligB_idx) selects the ligand atoms for ligB", default=None)
+    parser.add_argument("--ligA_const", help="atom to constrain in ligA", type=int)
+    parser.add_argument("--ligB_const", help="atom to constrain in ligB", default=None)
+    parser.add_argument("--mode", choices=["absolute", "relative"])
+    parser.add_argument("--dtype", type=str, default="float64", choices=["float32", "float64"])
+    parser.add_argument("--no-mixing", action="store_true")
     args = parser.parse_args()
     logger = logging.getLogger("mace_fep")
     logger.setLevel(log_level[args.log_level])
-    # parser.add_argument("--idx", type=int, nargs="+")
+    set_default_dtype(args.dtype)
 
-    ligA_idx = [i for i in range(0, 3)]
-    ligB_idx = [i for i in range(3, 7)]
+
+    ligA_idx = [i for i in range(0, args.ligA_idx)]
+    ligB_idx = [i for i in range(args.ligA_idx, args.ligB_idx)] if args.ligB_idx is not None else None
     # ligB_idx = []
 
     # make the output dir if it doesn't exist
     if not os.path.exists(args.output):
         os.makedirs(args.output, exist_ok=True)
+
+
+    if args.mode == "absolute":
+        fep_calc = FullCalcAbsoluteMACEFEPCalculator
+    elif args.mode == "relative":
+        fep_calc = FullCalcMACEFEPCalculator
+    else:
+        raise ValueError("mode must be absolute or relative")
+
+    constrain_atoms_idx = []
+    if args.ligA_const is not None:
+        constrain_atoms_idx.append(args.ligA_const)
+    if args.ligB_const is not None:
+        constrain_atoms_idx.append(args.ligB_const)
+    
 
     sampler = ReplicaExchange(
         mace_model=args.model_path,
@@ -44,10 +76,14 @@ def main():
         iters=args.iters,
         steps_per_iter=args.steps_per_iter,
         xyz_file=args.file,
-        replicas=args.replicas,
         ligA_idx=ligA_idx,
         ligB_idx=ligB_idx,
+        replicas=args.replicas,
+        constrain_atoms_idx=constrain_atoms_idx,
         restart=args.restart,
+        fep_calc=fep_calc,
+        dtype=args.dtype,
+        no_mixing=args.no_mixing
     )
 
     if args.minimise:
