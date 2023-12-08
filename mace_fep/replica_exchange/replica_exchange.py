@@ -243,7 +243,7 @@ class ReplicaExchange:
         # this function is inspired by the equivalent function from the openmmtools MultiStateSampler
         try:  # Trap errors for MBAR being under sampled and the W_nk matrix not being normalized correctly
             # get the latest u_kln from the netcdf file [n_replicas, n_states]
-            u_kln = self.reporter.variables["u_kln"][:].transpose(2,1,0)
+            u_kln = self.reporter.variables["u_kln"][:].transpose(1,2,0)
             k, l, n = u_kln.shape
 
 
@@ -273,8 +273,8 @@ class ReplicaExchange:
                 "iteration": self._current_iter,
                 "percent_complete": self._current_iter * 100 / self.iters,
                 "mbar_analysis": {
-                    "free_energy_in_kT": float(free_energy),
-                    "standard_error_in_kT": float(err_free_energy),
+                    "free_energy_in_eV": float(free_energy),
+                    "standard_error_in_eV": float(err_free_energy),
                     "number_of_uncorrelated_samples": float(n_uncorr_samples),
                     # "n_equilibrium_iterations": int(n_equilibration_iterations),
                     "statistical_inefficiency": float(statistical_inefficiency),
