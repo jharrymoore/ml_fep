@@ -12,11 +12,7 @@ from pydantic import BaseModel
 from ase.io import read
 from pymbar import MBAR, timeseries
 from pymbar.utils import ParameterError
-from mace_fep.replica_exchange.fep_calculator import (
-    FullCalcMACEFEPCalculator,
-)
 
-# from mace_fep.utils import timeit
 from ase.md.langevin import Langevin
 from ase import units
 from ase.optimize import LBFGS
@@ -52,6 +48,8 @@ class System:
             timestep=timestep * units.fs,
             temperature_K=temperature,
             friction=friction,
+            # logfile=os.path.join(output_dir, f"replica_{self.idx}.log"),
+            # trajectory=os.path.join(output_dir, f"replica_{self.idx}.traj"),
         )
 
         def write_frame():
@@ -61,7 +59,7 @@ class System:
                 parallel=False,
             )
 
-        self.integrator.attach(write_frame, interval=20)
+        self.integrator.attach(write_frame, interval=10)
 
     def propagate(self, steps: int) -> None:
         self.integrator.run(steps)
@@ -69,6 +67,63 @@ class System:
     def minimise(self, tol=0.2):
         minimiser = LBFGS(self.atoms)
         minimiser.run(fmax=tol)
+
+
+
+
+class NonEqiulibriumSwitching:
+    mace_model: str
+    ligA_idx: List[int]
+    iters: int
+    atoms: Atoms
+    init_lambda: float
+    system: System
+
+
+    def __init__(
+        self,
+        mace_model: str,
+        ligA_idx: List[int],
+        xyz_file: str,
+        init_lambda: float,
+        output_dir: str,
+        steps_per_iter: int,
+        fep_calc
+    ):
+        self.atoms = read(xyz_file)
+        self.mace_model = mace_model
+        self.ligA_idx = ligA_idx
+        self.steps_per_iter = steps_per_iter
+
+        self.init_lambda = init_lambda
+        self.steps_per_iter = steps_per_iter
+        self.output_dir = output_dir
+        self._initialize_system(init_lambda, fep_calc)
+
+
+
+    def _initialize_system(self, init_lambda, fep_calc: Callable):
+        # we just have the one Atoms object, and we propagate the lambda value with the trajectory
+
+        self.atoms.set_calculator(
+            fep_calc(
+                model_path= self.mace_model,
+                lmbda=init_lambda,
+                device="cuda",
+                delta_lambda = 1 / self.steps_per_iter,
+                stateA_idx=self.ligA_idx,
+                
+
+            )
+        )
+
+        self.systems = [System(atoms=self.atoms, lmbda=init_lambda, idx=0, output_dir=self.output_dir)]
+
+    def run(self):
+        logger.debug(f"propagating replica for {self.steps_per_iter} steos")
+        self.systems[0].propagate(self.steps_per_iter)
+
+
 
 
 class ReplicaExchange:

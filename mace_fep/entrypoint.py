@@ -1,11 +1,10 @@
 import argparse
-from mace_fep.replica_exchange.fep_calculator import AbsoluteMACEFEPCalculator, FullCalcAbsoluteMACEFEPCalculator, FullCalcMACEFEPCalculator
+from mace_fep.replica_exchange.fep_calculator import AbsoluteMACEFEPCalculator, FullCalcAbsoluteMACEFEPCalculator, FullCalcMACEFEPCalculator, NEQ_MACE_AFE_Calculator
 
-from mace_fep.replica_exchange.replica_exchange import ReplicaExchange
+from mace_fep.replica_exchange.replica_exchange import NonEqiulibriumSwitching, ReplicaExchange
 import logging
 import os
 from mace.tools import set_default_dtype
-import mpiplus
 
 log_level = {
     "DEBUG": logging.DEBUG,
@@ -38,7 +37,7 @@ def main():
     parser.add_argument("--ligB_idx", type=int, help="open interval [ligA_idx, ligB_idx) selects the ligand atoms for ligB", default=None)
     parser.add_argument("--ligA_const", help="atom to constrain in ligA", type=int)
     parser.add_argument("--ligB_const", help="atom to constrain in ligB", default=None)
-    parser.add_argument("--mode", choices=["absolute", "relative"])
+    parser.add_argument("--mode", choices=["absolute", "relative", "NEQAbsolute"])
     parser.add_argument("--dtype", type=str, default="float64", choices=["float32", "float64"])
     parser.add_argument("--no-mixing", action="store_true")
     args = parser.parse_args()
@@ -50,6 +49,10 @@ def main():
     ligA_idx = [i for i in range(0, args.ligA_idx)]
     ligB_idx = [i for i in range(args.ligA_idx, args.ligB_idx)] if args.ligB_idx is not None else None
     # ligB_idx = []
+    
+
+    logger.info(f"ligA_idx: {ligA_idx}")
+    logger.info(f"ligB_idx: {ligB_idx}")
 
     # make the output dir if it doesn't exist
     if not os.path.exists(args.output):
@@ -60,6 +63,8 @@ def main():
         fep_calc = FullCalcAbsoluteMACEFEPCalculator
     elif args.mode == "relative":
         fep_calc = FullCalcMACEFEPCalculator
+    elif args.mode == "NEQAbsolute":
+        fep_calc = NEQ_MACE_AFE_Calculator
     else:
         raise ValueError("mode must be absolute or relative")
 
@@ -70,21 +75,37 @@ def main():
         constrain_atoms_idx.append(args.ligB_const)
     
 
-    sampler = ReplicaExchange(
-        mace_model=args.model_path,
-        output_dir=args.output,
-        iters=args.iters,
-        steps_per_iter=args.steps_per_iter,
-        xyz_file=args.file,
-        ligA_idx=ligA_idx,
-        ligB_idx=ligB_idx,
-        replicas=args.replicas,
-        constrain_atoms_idx=constrain_atoms_idx,
-        restart=args.restart,
-        fep_calc=fep_calc,
-        dtype=args.dtype,
-        no_mixing=args.no_mixing
-    )
+    if args.mode != "NEQAbsolute":
+
+
+
+        sampler = ReplicaExchange(
+            mace_model=args.model_path,
+            output_dir=args.output,
+            iters=args.iters,
+            steps_per_iter=args.steps_per_iter,
+            xyz_file=args.file,
+            ligA_idx=ligA_idx,
+            ligB_idx=ligB_idx,
+            replicas=args.replicas,
+            constrain_atoms_idx=constrain_atoms_idx,
+            restart=args.restart,
+            fep_calc=fep_calc,
+            dtype=args.dtype,
+            no_mixing=args.no_mixing
+        )
+    else:
+        sampler = NonEqiulibriumSwitching(
+            mace_model=args.model_path,
+            ligA_idx=ligA_idx,
+            steps_per_iter=args.steps_per_iter,
+            xyz_file=args.file,
+            output_dir=args.output,
+            # Hardcode just the forward transition for now
+            init_lambda=0.0,
+            fep_calc=fep_calc,
+            )
+
 
     if args.minimise:
         sampler.minimise()

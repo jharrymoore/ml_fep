@@ -23,11 +23,161 @@ logger = logging.getLogger("mace_fep")
 # create a datastructure to hold the arrays for the interaction energy components
 # this is a dataclass, so we can access the attributes by name, but it is also a dictionary, so we can iterate over the keys
 
+class NEQ_MACE_AFE_Calculator(Calculator):
+    """MACE ASE Calculator"""
+
+    implemented_properties = ["energy", "free_energy", "forces", "dH/dL"]
+
+    def __init__(
+        self,
+        model_path: str,
+        lmbda: float,
+        stateA_idx: List[int],
+        device: str,
+        energy_units_to_eV: float = 1.0,
+        length_units_to_A: float = 1.0,
+        # cutoff around the solute where there is a significant change to the
+        cutoff_radius: float = 5.0,
+        default_dtype="float32",
+        delta_lambda: float = None,
+        **kwargs):
+        Calculator.__init__(self, **kwargs)
+        self.results = {}
+
+        self.model = torch.load(f=model_path, map_location=device)
+        self.r_max = float(self.model.r_max)
+        self.lmbda = lmbda
+        self.original_lambda = lmbda
+        # indices of the ligand atoms
+        self.stateA_idx = stateA_idx
+        self.delta_lambda = delta_lambda
+        self.device = torch_tools.init_device(device)
+        self.energy_units_to_eV = energy_units_to_eV
+        self.length_units_to_A = length_units_to_A
+        self.z_table = utils.AtomicNumberTable(
+            [int(z) for z in self.model.atomic_numbers]
+        )
+        torch_tools.set_default_dtype(default_dtype)
+        self.step_counter = 0
+        self.nl_cache = {}
+
+    # pylint: disable=dangerous-default-value
+    def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+        """
+        Calculate properties.
+        :param atoms: ase.Atoms object
+        :param properties: [str], properties to be computed, used by ASE internally
+        :param system_changes: [str], system changes since last calculation, used by ASE internally
+        :return:
+        """
+        solvent_idx = [i for i in range(len(atoms)) if i not in self.stateA_idx]
+        solvent_atoms = atoms[solvent_idx]
+        stateA_solute = atoms[self.stateA_idx]
+        stateA = stateA_solute + solvent_atoms
+        all_atoms = [
+            stateA,
+            stateA_solute,
+            solvent_atoms,
+        ]
+        # at each step increment the lambda so that we end up doing non-equibrium switching
+        self.step_counter += 1
+        if self.step_counter % 2 == 0:
+            self.lmbda += self.delta_lambda
+            logger.debug(f"Step: {self.step_counter}, lambda: {self.lmbda:.4f}")
+        else:
+            print("skipping")
+
+        for idx, at in enumerate(all_atoms):
+            # call to base-class to set atoms attribute
+            Calculator.calculate(self, at)
+
+            # prepare data
+            config = data.config_from_atoms(at)
+            # extract the neighbourlist from cache, unless we're every N steps, in which case update it
+            if self.step_counter % 20 != 0 and idx in self.nl_cache.keys():
+                edge_index, shifts, unit_shifts = self.nl_cache[idx]
+                nl = (edge_index, shifts, unit_shifts)
+            else:
+                # logger.debug("Updating neighbourlist at step %d" % self.step_counter)
+                nl = get_neighborhood(
+                    positions=config.positions,
+                    cutoff=self.r_max,
+                    pbc=config.pbc,
+                    cell=config.cell,
+                )
+                self.nl_cache[idx] = nl
+            data_loader = torch_geometric.dataloader.DataLoader(
+                dataset=[
+                    AtomicData.from_config(
+                        config, z_table=self.z_table, cutoff=self.r_max, nl=nl
+                    )
+                ],
+                batch_size=1,
+                shuffle=False,
+                drop_last=False,
+            )
+            batch = next(iter(data_loader)).to(self.device)
+
+            # predict + extract data
+            out = self.model(batch.to_dict(), compute_stress=False)
+            node_energies = out["node_energy"].detach().cpu().numpy()
+            energy = out["interaction_energy"].detach().cpu().item()
+            forces = out["forces"].detach().cpu().numpy()
+            # print(node_energies )
+            # attach to internal atoms object.  These should still be accessible after the loop
+            at.arrays["node_energies"] = node_energies
+            at.arrays["forces"] = (
+                forces * self.energy_units_to_eV / self.length_units_to_A
+            )
+            at.info["energy"] = energy * self.energy_units_to_eV
+
+        stateA_decoupled_forces = np.concatenate(
+            (stateA_solute.arrays["forces"], solvent_atoms.arrays["forces"]),
+            axis=0,
+        )
+
+        final_forces = self.lmbda * stateA.arrays["forces"] + (1 - self.lmbda) * (
+            stateA_decoupled_forces
+        )
+        dHdL = stateA.info["energy"] - (stateA_solute.info["energy"] + solvent_atoms.info["energy"])
+        if self.step_counter % 2 == 0:
+            logger.debug(f"dH/dL: {dHdL}")
+
+        # compute derivative of free enregy w.r.t. 
+        # gromacs just has a dhdl_lambda which advances lambda at each step. If we can write the dhdl value i.e. just the energy difference we should be able to watch the free energy interpolate
+
+        self.results = {
+            "energy": self.lmbda * stateA.info["energy"]
+            + (1 - self.lmbda)
+            * (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
+            "free_energy": self.lmbda * stateA.info["energy"]
+            + (1 - self.lmbda)
+            * (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
+            # difference between the total forces and the sun is that due to the interactions bettween solute and solvent.
+            "forces": final_forces,
+            # derivative of the energy expression w.r.t lambda just gives the difference between coupled nad uncoupled states
+            "dH/dL": stateA.info["energy"]
+            - (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
+        }
+        # logger.debug(f"Time taken for calculation: {t2-t1}")
+
+    def set_lambda(self, lmbda: float) -> None:
+        self.lmbda = lmbda
+
+    def get_lambda(self) -> float:
+        return self.lmbda
+
+    
+
+    def reset_lambda(self) -> None:
+        logger.debug(f"Resetting lambda to {self.original_lambda:.2f}")
+        self.lmbda = self.original_lambda
+
 
 class FullCalcAbsoluteMACEFEPCalculator(Calculator):
     """MACE ASE Calculator"""
 
-    implemented_properties = ["energy", "free_energy", "forces", "stress"]
+    implemented_properties = ["energy", "free_energy", "forces"]
 
     def __init__(
         self,
@@ -138,6 +288,9 @@ class FullCalcAbsoluteMACEFEPCalculator(Calculator):
             stateA_decoupled_forces
         )
 
+        # compute derivative of free enregy w.r.t. 
+        # gromacs just has a dhdl_lambda which advances lambda at each step. If we can write the dhdl value i.e. just the energy difference we should be able to watch the free energy interpolate
+
         self.results = {
             "energy": self.lmbda * stateA.info["energy"]
             + (1 - self.lmbda)
@@ -147,6 +300,7 @@ class FullCalcAbsoluteMACEFEPCalculator(Calculator):
             * (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
             # difference between the total forces and the sun is that due to the interactions bettween solute and solvent.
             "forces": final_forces,
+            "dH/dL": 0
         }
         t2 = time.time()
         # logger.debug(f"Time taken for calculation: {t2-t1}")
