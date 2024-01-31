@@ -40,6 +40,8 @@ def main():
     parser.add_argument("--mode", choices=["absolute", "relative", "NEQAbsolute"])
     parser.add_argument("--dtype", type=str, default="float64", choices=["float32", "float64"])
     parser.add_argument("--no-mixing", action="store_true")
+    parser.add_argument("--reverse", action="store_true")
+    parser.add_argument("--equilibrate", action="store_true")
     args = parser.parse_args()
     logger = logging.getLogger("mace_fep")
     logger.setLevel(log_level[args.log_level])
@@ -48,7 +50,6 @@ def main():
 
     ligA_idx = [i for i in range(0, args.ligA_idx)]
     ligB_idx = [i for i in range(args.ligA_idx, args.ligB_idx)] if args.ligB_idx is not None else None
-    # ligB_idx = []
     
 
     logger.info(f"ligA_idx: {ligA_idx}")
@@ -100,10 +101,12 @@ def main():
             ligA_idx=ligA_idx,
             steps_per_iter=args.steps_per_iter,
             xyz_file=args.file,
+            dtype=args.dtype,
             output_dir=args.output,
             # Hardcode just the forward transition for now
-            init_lambda=0.0,
+            init_lambda=0.0 if not args.reverse else 1.0,
             fep_calc=fep_calc,
+            equilibrate = args.equilibrate,
             )
 
 

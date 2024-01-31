@@ -48,6 +48,7 @@ class System:
             timestep=timestep * units.fs,
             temperature_K=temperature,
             friction=friction,
+            # for some reason adding the following lines causes the step count and lambda schedule to stop working
             # logfile=os.path.join(output_dir, f"replica_{self.idx}.log"),
             # trajectory=os.path.join(output_dir, f"replica_{self.idx}.traj"),
         )
@@ -59,17 +60,14 @@ class System:
                 parallel=False,
             )
 
-        self.integrator.attach(write_frame, interval=10)
+        self.integrator.attach(write_frame, interval=1000)
 
     def propagate(self, steps: int) -> None:
         self.integrator.run(steps)
 
-    def minimise(self, tol=0.2):
+    def minimise(self, tol=0.1):
         minimiser = LBFGS(self.atoms)
         minimiser.run(fmax=tol)
-
-
-
 
 class NonEqiulibriumSwitching:
     mace_model: str
@@ -79,7 +77,6 @@ class NonEqiulibriumSwitching:
     init_lambda: float
     system: System
 
-
     def __init__(
         self,
         mace_model: str,
@@ -88,7 +85,9 @@ class NonEqiulibriumSwitching:
         init_lambda: float,
         output_dir: str,
         steps_per_iter: int,
-        fep_calc
+        fep_calc: Callable,
+        equilibrate: bool,
+        dtype: str,
     ):
         self.atoms = read(xyz_file)
         self.mace_model = mace_model
@@ -98,22 +97,26 @@ class NonEqiulibriumSwitching:
         self.init_lambda = init_lambda
         self.steps_per_iter = steps_per_iter
         self.output_dir = output_dir
+        self.equilibrate = equilibrate
+        self.dtype = dtype
         self._initialize_system(init_lambda, fep_calc)
-
-
 
     def _initialize_system(self, init_lambda, fep_calc: Callable):
         # we just have the one Atoms object, and we propagate the lambda value with the trajectory
+        if self.equilibrate:
+            delta_lambda = 0.0
+        else:
+            delta_lambda = 1 / self.steps_per_iter if init_lambda == 0.0 else -1 / self.steps_per_iter
 
+        logger.info(f"delta_lambda: {delta_lambda}")
         self.atoms.set_calculator(
             fep_calc(
                 model_path= self.mace_model,
                 lmbda=init_lambda,
                 device="cuda",
-                delta_lambda = 1 / self.steps_per_iter,
+                delta_lambda = delta_lambda,
                 stateA_idx=self.ligA_idx,
-                
-
+                default_dtype=self.dtype
             )
         )
 
@@ -122,6 +125,10 @@ class NonEqiulibriumSwitching:
     def run(self):
         logger.debug(f"propagating replica for {self.steps_per_iter} steos")
         self.systems[0].propagate(self.steps_per_iter)
+
+    def minimise(self):
+        logger.debug("Minimising system")
+        self.systems[0].minimise()
 
 
 

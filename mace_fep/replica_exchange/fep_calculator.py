@@ -11,11 +11,13 @@ from mace.tools import torch_geometric, torch_tools, utils
 
 import torch
 import time
+from e3nn.util import jit
 import numpy as np
 from mace_fep.data import AtomicData
 from mace import data
 from mace.data import get_neighborhood
 from copy import deepcopy
+from torch.profiler import profile, record_function, ProfilerActivity
 
 logger = logging.getLogger("mace_fep")
 
@@ -26,7 +28,7 @@ logger = logging.getLogger("mace_fep")
 class NEQ_MACE_AFE_Calculator(Calculator):
     """MACE ASE Calculator"""
 
-    implemented_properties = ["energy", "free_energy", "forces", "dH/dL"]
+    implemented_properties = ["energy", "free_energy", "forces"]
 
     def __init__(
         self,
@@ -45,6 +47,7 @@ class NEQ_MACE_AFE_Calculator(Calculator):
         self.results = {}
 
         self.model = torch.load(f=model_path, map_location=device)
+        self.model = jit.script(self.model)
         self.r_max = float(self.model.r_max)
         self.lmbda = lmbda
         self.original_lambda = lmbda
@@ -84,8 +87,6 @@ class NEQ_MACE_AFE_Calculator(Calculator):
         if self.step_counter % 2 == 0:
             self.lmbda += self.delta_lambda
             logger.debug(f"Step: {self.step_counter}, lambda: {self.lmbda:.4f}")
-        else:
-            print("skipping")
 
         for idx, at in enumerate(all_atoms):
             # call to base-class to set atoms attribute
@@ -117,15 +118,22 @@ class NEQ_MACE_AFE_Calculator(Calculator):
                 drop_last=False,
             )
             batch = next(iter(data_loader)).to(self.device)
-
+            
+            # with profile(activities=[
+            #         ProfilerActivity.CPU], record_shapes=True) as prof:
+            #     with record_function("model_inference"):
+            #         out = self.model(batch.to_dict(), compute_stress=False)
+            #
+            # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
             # predict + extract data
             out = self.model(batch.to_dict(), compute_stress=False)
-            node_energies = out["node_energy"].detach().cpu().numpy()
+            # torch.cuda.synchronize()
+            # node_energies = out["node_energy"].detach().cpu().numpy()
             energy = out["interaction_energy"].detach().cpu().item()
             forces = out["forces"].detach().cpu().numpy()
             # print(node_energies )
             # attach to internal atoms object.  These should still be accessible after the loop
-            at.arrays["node_energies"] = node_energies
+            # at.arrays["node_energies"] = node_energies
             at.arrays["forces"] = (
                 forces * self.energy_units_to_eV / self.length_units_to_A
             )
@@ -150,9 +158,8 @@ class NEQ_MACE_AFE_Calculator(Calculator):
             "energy": self.lmbda * stateA.info["energy"]
             + (1 - self.lmbda)
             * (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
-            "free_energy": self.lmbda * stateA.info["energy"]
-            + (1 - self.lmbda)
-            * (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
+            "free_energy": stateA.info["energy"]
+            - (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
             # difference between the total forces and the sun is that due to the interactions bettween solute and solvent.
             "forces": final_forces,
             # derivative of the energy expression w.r.t lambda just gives the difference between coupled nad uncoupled states
