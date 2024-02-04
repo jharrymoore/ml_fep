@@ -1,10 +1,12 @@
 import argparse
-from mace_fep.replica_exchange.fep_calculator import AbsoluteMACEFEPCalculator, FullCalcAbsoluteMACEFEPCalculator, FullCalcMACEFEPCalculator, NEQ_MACE_AFE_Calculator
+from mace_fep.replica_exchange.fep_calculator import AbsoluteMACEFEPCalculator, FullCalcAbsoluteMACEFEPCalculator, FullCalcMACEFEPCalculator, NEQ_MACE_AFE_Calculator, NEQ_MACE_RFE_Calculator
 
-from mace_fep.replica_exchange.replica_exchange import NonEqiulibriumSwitching, ReplicaExchange
+from mace_fep.replica_exchange.replica_exchange import NonEquilibriumSwitching, ReplicaExchange
 import logging
 import os
 from mace.tools import set_default_dtype
+
+from mace_fep.utils import setup_logger
 
 log_level = {
     "DEBUG": logging.DEBUG,
@@ -12,11 +14,6 @@ log_level = {
     "WARNING": logging.WARNING,
     "ERROR": logging.ERROR,
 }
-
-logging.basicConfig(
-    format='%(asctime)s %(levelname)-8s %(message)s',
-    level=logging.INFO,
-    datefmt='%Y-%m-%d %H:%M:%S')
 
 
 
@@ -36,16 +33,18 @@ def main():
     parser.add_argument("--ligA_idx", type=int, help="open interval [0, ligA_idx) selects the ligand atoms for ligA", default=None)
     parser.add_argument("--ligB_idx", type=int, help="open interval [ligA_idx, ligB_idx) selects the ligand atoms for ligB", default=None)
     parser.add_argument("--ligA_const", help="atom to constrain in ligA", type=int)
-    parser.add_argument("--ligB_const", help="atom to constrain in ligB", default=None)
-    parser.add_argument("--mode", choices=["absolute", "relative", "NEQAbsolute"])
+    parser.add_argument("--ligB_const", help="atom to constrain in ligB", default=None, type=int)
+    parser.add_argument("--mode", choices=["EQAbsolute", "EQRelative", "NEQAbsolute", "NEQRelative"])
     parser.add_argument("--dtype", type=str, default="float64", choices=["float32", "float64"])
     parser.add_argument("--no-mixing", action="store_true")
     parser.add_argument("--reverse", action="store_true")
     parser.add_argument("--equilibrate", action="store_true")
+    parser.add_argument("--report_interval", type=int, default=100)
     args = parser.parse_args()
     logger = logging.getLogger("mace_fep")
     logger.setLevel(log_level[args.log_level])
     set_default_dtype(args.dtype)
+    setup_logger(level=log_level[args.log_level], tag="mace_fep", directory=args.output)
 
 
     ligA_idx = [i for i in range(0, args.ligA_idx)]
@@ -66,6 +65,8 @@ def main():
         fep_calc = FullCalcMACEFEPCalculator
     elif args.mode == "NEQAbsolute":
         fep_calc = NEQ_MACE_AFE_Calculator
+    elif args.mode == "NEQRelative":
+        fep_calc = NEQ_MACE_RFE_Calculator
     else:
         raise ValueError("mode must be absolute or relative")
 
@@ -76,10 +77,7 @@ def main():
         constrain_atoms_idx.append(args.ligB_const)
     
 
-    if args.mode != "NEQAbsolute":
-
-
-
+    if args.mode in ["EQRelative", "EQAbsolute"]:
         sampler = ReplicaExchange(
             mace_model=args.model_path,
             output_dir=args.output,
@@ -95,22 +93,27 @@ def main():
             dtype=args.dtype,
             no_mixing=args.no_mixing
         )
-    else:
-        sampler = NonEqiulibriumSwitching(
+    elif args.mode in ["NEQAbsolute", "NEQRelative"]:
+        sampler = NonEquilibriumSwitching(
             mace_model=args.model_path,
             ligA_idx=ligA_idx,
+            ligB_idx=ligB_idx,
             steps_per_iter=args.steps_per_iter,
+            constrain_atoms_idx=constrain_atoms_idx,
             xyz_file=args.file,
             dtype=args.dtype,
             output_dir=args.output,
-            # Hardcode just the forward transition for now
-            init_lambda=0.0 if not args.reverse else 1.0,
+            reverse=args.reverse,
             fep_calc=fep_calc,
+            restart = args.restart,
             equilibrate = args.equilibrate,
+            interval=args.report_interval
             )
+    else:
+        raise ValueError(f"Did not recognise mode {args.mode}")
 
 
-    if args.minimise:
+    if args.minimise and not args.restart:
         sampler.minimise()
     sampler.run()
 

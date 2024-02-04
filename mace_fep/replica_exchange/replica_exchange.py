@@ -1,14 +1,15 @@
 import logging
 import os
 import time
-import timeit
 from typing import List, Optional, Callable
 from ase import Atoms
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 import torch
+from ase.io import write
+from datetime import date, datetime
 
 import numpy as np
 import netCDF4
-from pydantic import BaseModel
 from ase.io import read
 from pymbar import MBAR, timeseries
 from pymbar.utils import ParameterError
@@ -19,11 +20,23 @@ from ase.optimize import LBFGS
 from ase.constraints import FixAtoms
 import mpiplus
 import yaml
+from ase.md.npt import NPT
 
 from mace_fep.utils import with_timer
 
 logger = logging.getLogger("mace_fep")
 
+# ioan's settings for organic systems - from ethanol water simulations
+tstep   = 1.0*units.fs
+ttime   = 50*units.fs
+B_water = 2.0*units.GPa #vs 100*units.GPa recommended default
+ptime   = 2500*units.fs
+
+MD_T  = 1000000
+MD_dt = 100
+TH_dt = 10
+pres  = 1.013
+densfact = (units.m/1.0e2)**3/units.mol
 
 class System:
     def __init__(
@@ -35,23 +48,47 @@ class System:
         timestep: float = 1.0,
         temperature: float = 300.0,
         friction: float = 0.01,
+        lbfgs_fmax: float = 0.2,
+        integrator: str = "Langevin",
+        report_interval: int = 100,
+        start_step: int = 0,
     ) -> None:
         self.lmbda = lmbda
         # this will imutably tag the simulation with the lambda value that is it started with, regardless of where the lambda value ends up due to replica exchange
         self.idx = idx
+        self.restart = True if start_step > 0 else False
 
-        # TODO: is this a reference to some heap allocated atoms, such that this gets updated after we call .minimise() and .propagate()?
         self.atoms = atoms
+        MaxwellBoltzmannDistribution(self.atoms, temperature_K=temperature)
+        self.output_dir = output_dir
+        start_config_com = atoms.get_center_of_mass().copy()
+        start_config_positions = atoms.positions.copy()
+        self.lbfgs_fmax = lbfgs_fmax
+        self.report_interval = report_interval
+        self.checkpoint_time = time.time()
+        
+        if integrator == "Langevin":
+            logging.info("Setting up Langevin dynamics")
+            self.integrator = Langevin(
+                self.atoms,
+                timestep=timestep * units.fs,
+                temperature_K=temperature,
+                friction=friction,
+            )
+        elif integrator == "NPT":
+            logging.info("Setting up NPT dynamics")
+            self.integrator = NPT(atoms=self.atoms,
+                                  timestep=timestep * units.fs,
+                                  temperature_K=temperature,
+                                  externalstress=pres*units.bar,
+                                  ttime=ttime,
+                                  pfactor=ptime**2*B_water)
+            self.integrator.set_fraction_traceless(0)
+        else:
+            raise ValueError(f"Unknown integrator {integrator}")
 
-        self.integrator = Langevin(
-            self.atoms,
-            timestep=timestep * units.fs,
-            temperature_K=temperature,
-            friction=friction,
-            # for some reason adding the following lines causes the step count and lambda schedule to stop working
-            # logfile=os.path.join(output_dir, f"replica_{self.idx}.log"),
-            # trajectory=os.path.join(output_dir, f"replica_{self.idx}.traj"),
-        )
+        self.integrator.nsteps = start_step
+        logging.info(f"Starting from step {start_step}")
 
         def write_frame():
             self.integrator.atoms.write(
@@ -59,17 +96,59 @@ class System:
                 append=True,
                 parallel=False,
             )
+        def print_traj():
+            current_time = time.time()
+            time_elapsed = current_time - self.checkpoint_time
+            # steps per second
+            steps_per_day = (self.report_interval/time_elapsed) * 86400
+            ns_per_day = steps_per_day * timestep * 1e-6
+
+            a = self.integrator.atoms
+            calc_time = self.integrator.get_time()/units.fs
+            calc_temp = a.get_temperature()
+            calc_dens = np.sum(a.get_masses())/a.get_volume()*densfact
+            # calc_pres = -np.trace(a.get_stress(include_ideal_gas=True, voigt=False))/3/units.bar if self.integrator.__class__.__name__ == 'NPT' else np.zeros(1)
+            calc_epot = a.get_potential_energy()
+            dhdl = a.get_potential_energy(force_consistent=True)
+            calc_msd  = (((a.positions-a.get_center_of_mass())-(start_config_positions-start_config_com))**2).mean(0).sum(0)
+            calc_drft = ((a.get_center_of_mass()-start_config_com)**2).sum(0)
+            # calc_tens = -a.get_stress(include_ideal_gas=True, voigt=True)/units.bar if self.integrator.__class__.__name__ == 'NPT' else np.zeros(6)
+            calc_volume = a.get_volume() * densfact
+            a.info['step'] = self.integrator.nsteps
+            a.info['time_fs'] = self.integrator.get_time()/units.fs
+            a.info['time_ps'] = self.integrator.get_time()/units.fs/1000
+            with open(os.path.join(output_dir, "thermo_traj.dat"), 'a') as thermo_traj:
+                thermo_traj.write(('%12.1f'+' %17.6f'*7+'\n') % (calc_time, ns_per_day, calc_temp, calc_dens, calc_epot, calc_msd, calc_drft, calc_volume ))
+                thermo_traj.flush()
+            print(('%12.1f'+' %17.6f'*7) % (calc_time, ns_per_day, calc_temp, calc_dens, calc_epot, calc_msd, calc_drft, calc_volume ))
+            with open(os.path.join(output_dir, "dhdl.xvg"), 'a') as xvg:
+                time_ps = calc_time 
+                xvg.write(f"{time_ps:.4f} {dhdl:.6f}\n")
+            self.checkpoint_time = time.time()
+           
+
 
         self.integrator.attach(write_frame, interval=1000)
+        # write out every fs
+        self.integrator.attach(print_traj, interval=self.report_interval)
 
     def propagate(self, steps: int) -> None:
+        if not self.restart:
+            with open(os.path.join(self.output_dir, "thermo_traj.dat"), 'a') as thermo_traj:
+                thermo_traj.write('# ASE Dynamics. Date: '+date.today().strftime("%d %b %Y")+'\n')
+                thermo_traj.write('   Time(fs)     Latency(ns/day)    Temperature(K) Density(g/cm$^3$)        Energy(eV)        MSD(A$^2$)       COMSD(A$^2$)   Volume(cm$^3$)\n')
+                print('# ASE Dynamics. Date: '+date.today().strftime("%d %b %Y"))
+                print('   Time(fs)     Latency(ns/day)    Temperature(K) Density(g/cm$^3$)        Energy(eV)        MSD(A$^2$)       COMSD(A$^2$)   Volume(cm$^3$)\n')
+            with open(os.path.join(self.output_dir, "dhdl.xvg"), 'a') as dhdl:
+                dhdl.write('# Time (ps) dH/dL\n')
+            
         self.integrator.run(steps)
 
-    def minimise(self, tol=0.1):
+    def minimise(self):
         minimiser = LBFGS(self.atoms)
-        minimiser.run(fmax=tol)
+        minimiser.run(fmax=self.lbfgs_fmax)
 
-class NonEqiulibriumSwitching:
+class NonEquilibriumSwitching:
     mace_model: str
     ligA_idx: List[int]
     iters: int
@@ -82,53 +161,93 @@ class NonEqiulibriumSwitching:
         mace_model: str,
         ligA_idx: List[int],
         xyz_file: str,
-        init_lambda: float,
         output_dir: str,
         steps_per_iter: int,
         fep_calc: Callable,
         equilibrate: bool,
+        reverse: bool,
+        restart: bool,
         dtype: str,
+        interval: int,
+        ligB_idx: Optional[List[int]]= None,
+        constrain_atoms_idx: Optional[List[int]]= None
     ):
-        self.atoms = read(xyz_file)
-        self.mace_model = mace_model
-        self.ligA_idx = ligA_idx
-        self.steps_per_iter = steps_per_iter
+        if not restart:
+            self.atoms = read(xyz_file)
+            last_recorded_step = 0
+        else:
+            last_traj = os.path.join(output_dir, "output_replica_0.xyz")
+            self.atoms = read(last_traj, -1)
+            last_recorded_step = self.atoms.info["step"]
+            logger.info(f"Restarting from step {last_recorded_step} from {last_traj}")
 
-        self.init_lambda = init_lambda
+            # we need to remove the frames from the dhdl + thermo file after the last timestep
+            #or maybe we just remove the duplicates after the fact
+            os.system(f"head -n {last_recorded_step+3} {output_dir}/thermo_traj.dat > {output_dir}/thermo_traj.temp")
+            os.system(f"mv {output_dir}/thermo_traj.temp {output_dir}/thermo_traj.dat")
+
+            os.system(f"head -n {last_recorded_step+2} {output_dir}/dhdl.xvg > {output_dir}/dhdl.temp")
+            os.system(f"mv {output_dir}/dhdl.temp {output_dir}/dhdl.xvg")
+
+
+        self.mace_model = mace_model
+        self.reverse = reverse
+        self.ligA_idx = ligA_idx
+        self.ligB_idx = ligB_idx
+        if equilibrate:
+            self.delta_lambda = 0.0
+        else:
+            self.delta_lambda = 1 / steps_per_iter if not self.reverse else -1 / steps_per_iter
+        self.steps_per_iter = steps_per_iter - last_recorded_step
+        self.restart = restart
+
+        if constrain_atoms_idx is not None: 
+            logger.info(f"Constraining atoms {constrain_atoms_idx}")
+            c = FixAtoms(indices=constrain_atoms_idx)
+            self.atoms.set_constraint(c)
+        init_lambda = 1.0 if self.reverse else 0.0
+        if self.restart:
+            # compute what lambda value was after  
+            init_lambda += self.delta_lambda * last_recorded_step
+            logger.info(f"Setting restart lambda to {init_lambda}")
         self.steps_per_iter = steps_per_iter
         self.output_dir = output_dir
         self.equilibrate = equilibrate
         self.dtype = dtype
-        self._initialize_system(init_lambda, fep_calc)
+        self.interval = interval
+        self._initialize_system(init_lambda, fep_calc, last_recorded_step)
 
-    def _initialize_system(self, init_lambda, fep_calc: Callable):
+    def _initialize_system(self, init_lambda, fep_calc: Callable, last_recorded_step: int):
         # we just have the one Atoms object, and we propagate the lambda value with the trajectory
-        if self.equilibrate:
-            delta_lambda = 0.0
-        else:
-            delta_lambda = 1 / self.steps_per_iter if init_lambda == 0.0 else -1 / self.steps_per_iter
+        # set the lambda to the last value if the trajectory data file already exists
 
-        logger.info(f"delta_lambda: {delta_lambda}")
         self.atoms.set_calculator(
             fep_calc(
                 model_path= self.mace_model,
                 lmbda=init_lambda,
                 device="cuda",
-                delta_lambda = delta_lambda,
+                delta_lambda = self.delta_lambda,
                 stateA_idx=self.ligA_idx,
+                stateB_idx=self.ligB_idx,
                 default_dtype=self.dtype
             )
         )
 
-        self.systems = [System(atoms=self.atoms, lmbda=init_lambda, idx=0, output_dir=self.output_dir)]
+        self.systems = [System(atoms=self.atoms, 
+                               lmbda=init_lambda,
+                               idx=0, 
+                               output_dir=self.output_dir,
+                               report_interval=self.interval, 
+                               start_step=last_recorded_step)]
 
     def run(self):
-        logger.debug(f"propagating replica for {self.steps_per_iter} steos")
+        logger.info(f"propagating replica for {self.steps_per_iter} steos")
         self.systems[0].propagate(self.steps_per_iter)
 
     def minimise(self):
-        logger.debug("Minimising system")
+        logger.info("Minimising system")
         self.systems[0].minimise()
+        self.systems[0].atoms.write(f"{self.output_dir}/minimized.xyz")
 
 
 
