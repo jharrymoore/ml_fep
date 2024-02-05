@@ -85,13 +85,6 @@ class NEQ_MACE_AFE_Calculator(Calculator):
             stateA_solute,
             solvent_atoms,
         ]
-        # at each step increment the lambda so that we end up doing non-equibrium switching
-        self.step_counter += 1
-        # Langevin dynamics requires two force calls for each integration step
-        if self.step_counter % 2 == 0:
-            self.lmbda += self.delta_lambda
-            logger.debug(f"Step: {self.step_counter}, lambda: {self.lmbda:.4f}")
-
         for idx, at in enumerate(all_atoms):
             # call to base-class to set atoms attribute
             Calculator.calculate(self, at)
