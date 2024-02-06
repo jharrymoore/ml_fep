@@ -85,6 +85,16 @@ class NEQ_MACE_AFE_Calculator(Calculator):
             stateA_solute,
             solvent_atoms,
         ]
+        # if lambda = 0, we don't need to evaluate the full system, just the components
+        if self.lmbda == 0 and self.delta_lambda == 0:
+            # running equilbrium simulation of the decoupled system
+            all_atoms = [stateA_solute, solvent_atoms]
+            # now set zeroes in the appropriate places
+            stateA.arrays["forces"] = np.zeros((len(stateA), 3))
+            stateA.info["energy"] = 0
+            stateA.info["free_energy"] = 0
+
+
         for idx, at in enumerate(all_atoms):
             # call to base-class to set atoms attribute
             Calculator.calculate(self, at)
