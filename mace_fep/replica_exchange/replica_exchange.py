@@ -54,6 +54,7 @@ class System:
         integrator: str = "Langevin",
         report_interval: int = 100,
         start_step: int = 0,
+        use_ssc: bool = False
     ) -> None:
         self.lmbda = lmbda
         self.delta_lamdba = delta_lamdba
@@ -71,6 +72,7 @@ class System:
         self.lbfgs_fmax = lbfgs_fmax
         self.report_interval = report_interval
         self.checkpoint_time = time.time()
+        self.use_ssc = use_ssc
         
         if integrator == "Langevin":
             logging.info("Setting up Langevin dynamics")
@@ -103,8 +105,13 @@ class System:
             )
 
         def update_lambda():
-            self.integrator.atoms.calc.set_lambda(self.lmbda + self.delta_lamdba)
             self.lmbda += self.delta_lamdba
+            
+            if self.use_ssc:
+                lambda_val = 6 * self.lmbda**5 - 15 * self.lmbda**4 + 10 * self.lmbda**3 
+            else:
+                lambda_val = self.lmbda
+            self.integrator.atoms.calc.set_lambda(lambda_val)
 
         def print_traj():
             current_time = time.time()
