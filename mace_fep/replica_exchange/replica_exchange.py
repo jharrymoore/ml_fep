@@ -190,6 +190,7 @@ class NonEquilibriumSwitching:
         restart: bool,
         dtype: str,
         interval: int,
+        use_ssc: bool,
         ligB_idx: Optional[List[int]]= None,
         constrain_atoms_idx: Optional[List[int]]= None
     ):
@@ -261,6 +262,7 @@ class NonEquilibriumSwitching:
                                output_dir=self.output_dir,
                                report_interval=self.interval, 
                                delta_lamdba=self.delta_lambda,
+                               use_ssc=self.use_ssc,
                                start_step=last_recorded_step)]
 
     def run(self):

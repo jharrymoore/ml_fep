@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--reverse", action="store_true")
     parser.add_argument("--equilibrate", action="store_true")
     parser.add_argument("--report_interval", type=int, default=100)
+    parser.add_argument("--use_ssc", action="store_true")
     args = parser.parse_args()
     logger = logging.getLogger("mace_fep")
     logger.setLevel(log_level[args.log_level])
@@ -104,6 +105,7 @@ def main():
             dtype=args.dtype,
             output_dir=args.output,
             reverse=args.reverse,
+            use_ssc=args.use_ssc
             fep_calc=fep_calc,
             restart = args.restart,
             equilibrate = args.equilibrate,
