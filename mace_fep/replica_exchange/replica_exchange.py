@@ -216,6 +216,7 @@ class NonEquilibriumSwitching:
         self.reverse = reverse
         self.ligA_idx = ligA_idx
         self.ligB_idx = ligB_idx
+        self.use_ssc = use_ssc
         if equilibrate:
             self.delta_lambda = 0.0
         else:
@@ -232,12 +233,15 @@ class NonEquilibriumSwitching:
         if self.restart:
             # compute what lambda value was after  
             init_lambda += (self.delta_lambda * last_recorded_step)
+            if self.use_ssc:
+                init_lambda = self.ssc_lambda(init_lambda)
             logger.info(f"Setting restart lambda to {init_lambda}")
         self.output_dir = output_dir
         self.equilibrate = equilibrate
         self.dtype = dtype
         self.interval = interval
         self._initialize_system(init_lambda, fep_calc, last_recorded_step)
+
 
     def _initialize_system(self, init_lambda, fep_calc: Callable, last_recorded_step: int):
         # we just have the one Atoms object, and we propagate the lambda value with the trajectory

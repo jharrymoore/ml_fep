@@ -105,7 +105,7 @@ def main():
             dtype=args.dtype,
             output_dir=args.output,
             reverse=args.reverse,
-            use_ssc=args.use_ssc
+            use_ssc=args.use_ssc,
             fep_calc=fep_calc,
             restart = args.restart,
             equilibrate = args.equilibrate,
