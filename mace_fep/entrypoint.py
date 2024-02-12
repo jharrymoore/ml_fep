@@ -1,12 +1,15 @@
-import argparse
-from mace_fep.replica_exchange.fep_calculator import AbsoluteMACEFEPCalculator, FullCalcAbsoluteMACEFEPCalculator, FullCalcMACEFEPCalculator, NEQ_MACE_AFE_Calculator, NEQ_MACE_RFE_Calculator
+from typing import Tuple
+from mace_fep.calculators import NEQ_MACE_AFE_Calculator
+from mace_fep.lambda_schedule import LambdaSchedule
 
-from mace_fep.replica_exchange.replica_exchange import NonEquilibriumSwitching, ReplicaExchange
 import logging
 import os
 from mace.tools import set_default_dtype
+from ase.io import read
+from ase import Atoms
+from mace_fep.system import NEQSystem
 
-from mace_fep.utils import setup_logger
+from mace_fep.utils import parse_arguments, setup_logger
 
 log_level = {
     "DEBUG": logging.DEBUG,
@@ -15,42 +18,40 @@ log_level = {
     "ERROR": logging.ERROR,
 }
 
+# def initialize_system(init_lambda: float, fep_calc: Calculator, last_recorded_step: int):
+#     # we just have the one Atoms object, and we propagate the lambda value with the trajectory
+#     # set the lambda to the last value if the trajectory data file already exists
+#
+#     self.atoms.set_calculator(fep_calc)
 
+def setup_atoms(restart: bool, xyz_file: str, output_dir: str) -> Tuple[Atoms, int]:
+    if not restart:
+        atoms = read(xyz_file)
+        last_recorded_step = 0
+    else:
+        last_traj = os.path.join(output_dir, "output_replica_0.xyz")
+        atoms = read(last_traj, -1)
+        last_recorded_step = atoms.info["step"]
+        logging.info(f"Restarting from step {last_recorded_step} from {last_traj}")
+
+        # we need to remove the frames from the dhdl + thermo file after the last timestep
+        #or maybe we just remove the duplicates after the fact
+        os.system(f"head -n {last_recorded_step+3} {output_dir}/thermo_traj.dat > {output_dir}/thermo_traj.temp")
+        os.system(f"mv {output_dir}/thermo_traj.temp {output_dir}/thermo_traj.dat")
+
+        os.system(f"head -n {last_recorded_step+2} {output_dir}/dhdl.xvg > {output_dir}/dhdl.temp")
+        os.system(f"mv {output_dir}/dhdl.temp {output_dir}/dhdl.xvg")
+    return atoms, last_recorded_step
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--file", type=str)
-    parser.add_argument("--replicas", type=int, default=4)
-    parser.add_argument("--steps_per_iter", type=int, default=100)
-    parser.add_argument(
-        "--model_path", type=str, default="input_files/SPICE_sm_inv_neut_E0_swa.model"
-    )
-    parser.add_argument("--iters", type=int, default=100)
-    parser.add_argument("-o", "--output", type=str, default="junk")
-    parser.add_argument("--minimise", action="store_true")
-    parser.add_argument("--restart", action="store_true")
-    parser.add_argument("--log_level", type=str, default="INFO")
-    parser.add_argument("--ligA_idx", type=int, help="open interval [0, ligA_idx) selects the ligand atoms for ligA", default=None)
-    parser.add_argument("--ligB_idx", type=int, help="open interval [ligA_idx, ligB_idx) selects the ligand atoms for ligB", default=None)
-    parser.add_argument("--ligA_const", help="atom to constrain in ligA", type=int)
-    parser.add_argument("--ligB_const", help="atom to constrain in ligB", default=None, type=int)
-    parser.add_argument("--mode", choices=["EQAbsolute", "EQRelative", "NEQAbsolute", "NEQRelative"])
-    parser.add_argument("--dtype", type=str, default="float64", choices=["float32", "float64"])
-    parser.add_argument("--no-mixing", action="store_true")
-    parser.add_argument("--reverse", action="store_true")
-    parser.add_argument("--equilibrate", action="store_true")
-    parser.add_argument("--report_interval", type=int, default=100)
-    parser.add_argument("--use_ssc", action="store_true")
-    args = parser.parse_args()
+    args = parse_arguments().parse_args()
     logger = logging.getLogger("mace_fep")
     logger.setLevel(log_level[args.log_level])
     set_default_dtype(args.dtype)
     setup_logger(level=log_level[args.log_level], tag="mace_fep", directory=args.output)
 
-
     ligA_idx = [i for i in range(0, args.ligA_idx)]
     ligB_idx = [i for i in range(args.ligA_idx, args.ligB_idx)] if args.ligB_idx is not None else None
-    
 
     logger.info(f"ligA_idx: {ligA_idx}")
     logger.info(f"ligB_idx: {ligB_idx}")
@@ -59,65 +60,60 @@ def main():
     if not os.path.exists(args.output):
         os.makedirs(args.output, exist_ok=True)
 
+    atoms, last_recorded_step = setup_atoms(args.restart, args.file, args.output)
+    steps_remaining = args.steps - last_recorded_step
 
-    if args.mode == "absolute":
-        fep_calc = FullCalcAbsoluteMACEFEPCalculator
-    elif args.mode == "relative":
-        fep_calc = FullCalcMACEFEPCalculator
-    elif args.mode == "NEQAbsolute":
-        fep_calc = NEQ_MACE_AFE_Calculator
-    elif args.mode == "NEQRelative":
-        fep_calc = NEQ_MACE_RFE_Calculator
+    if args.equilibrate:
+        delta_lambda = 0.0
     else:
-        raise ValueError("mode must be absolute or relative")
+        delta_lambda = 1.0 / args.steps if not args.reverse else -1.0 / args.steps
+    logger.info(f"Delta lambda: {delta_lambda}")
+
+    lambda_schedule = LambdaSchedule(start=last_recorded_step,
+                                     delta=delta_lambda,
+                                     n_steps=steps_remaining,
+                                     use_ssc=args.use_ssc)
+
+    # if args.mode == "absolute":
+    #     fep_calc = FullCalcAbsoluteMACEFEPCalculator
+    # elif args.mode == "relative":
+    #     fep_calc = FullCalcMACEFEPCalculator
+    # elif args.mode == "NEQAbsolute":
+    fep_calc = NEQ_MACE_AFE_Calculator(
+        model_path=args.model_path,
+        ligA_idx=ligA_idx,
+        default_dtype=args.dtype,
+        device=args.device,
+        lambda_schedule=lambda_schedule,
+    )
+    # elif args.mode == "NEQRelative":
+    #     raise NotImplementedError("NEQRelative not implemented")
+    # else:
+        # raise ValueError("mode must be absolute or relative")
+
+    atoms.set_calculator(fep_calc)
 
     constrain_atoms_idx = []
     if args.ligA_const is not None:
         constrain_atoms_idx.append(args.ligA_const)
     if args.ligB_const is not None:
         constrain_atoms_idx.append(args.ligB_const)
-    
 
     if args.mode in ["EQRelative", "EQAbsolute"]:
-        sampler = ReplicaExchange(
-            mace_model=args.model_path,
-            output_dir=args.output,
-            iters=args.iters,
-            steps_per_iter=args.steps_per_iter,
-            xyz_file=args.file,
-            ligA_idx=ligA_idx,
-            ligB_idx=ligB_idx,
-            replicas=args.replicas,
-            constrain_atoms_idx=constrain_atoms_idx,
-            restart=args.restart,
-            fep_calc=fep_calc,
-            dtype=args.dtype,
-            no_mixing=args.no_mixing
-        )
+        raise NotImplementedError("EQRelative and EQAbsolute not implemented")
     elif args.mode in ["NEQAbsolute", "NEQRelative"]:
-        sampler = NonEquilibriumSwitching(
-            mace_model=args.model_path,
-            ligA_idx=ligA_idx,
-            ligB_idx=ligB_idx,
-            steps_per_iter=args.steps_per_iter,
+        sampler =NEQSystem(
+            atoms=atoms,
+            total_steps=args.steps,
             constrain_atoms_idx=constrain_atoms_idx,
-            xyz_file=args.file,
-            dtype=args.dtype,
             output_dir=args.output,
-            reverse=args.reverse,
-            use_ssc=args.use_ssc,
-            fep_calc=fep_calc,
-            restart = args.restart,
-            equilibrate = args.equilibrate,
-            interval=args.report_interval
-            )
+        )
     else:
         raise ValueError(f"Did not recognise mode {args.mode}")
 
-
     if args.minimise and not args.restart:
         sampler.minimise()
-    sampler.run()
+    sampler.propagate()
 
 
 if __name__ == "__main__":

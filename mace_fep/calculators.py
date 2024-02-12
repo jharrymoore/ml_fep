@@ -1,11 +1,9 @@
-from dataclasses import dataclass
 import logging
-import os
-from ase import Atoms, md
+from ase import Atoms
 from ase.calculators.calculator import Calculator, all_changes
 from ase.geometry import get_distances
 from ase.io import write
-from typing import List, Union
+from typing import List, Tuple
 from ase import neighborlist
 from mace.tools import torch_geometric, torch_tools, utils
 
@@ -16,18 +14,8 @@ import numpy as np
 from mace_fep.data import AtomicData
 from mace import data
 from mace.data import get_neighborhood
-from copy import deepcopy
-from torch.profiler import profile, record_function, ProfilerActivity
-from ase import units
 
 logger = logging.getLogger("mace_fep")
-
-
-# create a datastructure to hold the arrays for the interaction energy components
-# this is a dataclass, so we can access the attributes by name, but it is also a dictionary, so we can iterate over the keys
-
-
-
 
 class NEQ_MACE_AFE_Calculator(Calculator):
     """MACE ASE Calculator"""
@@ -37,27 +25,19 @@ class NEQ_MACE_AFE_Calculator(Calculator):
     def __init__(
         self,
         model_path: str,
-        lmbda: float,
-        stateA_idx: List[int],
+        ligA_idx: List[int],
         device: str,
+        lambda_schedule,
         energy_units_to_eV: float = 1.0,
         length_units_to_A: float = 1.0,
-        # cutoff around the solute where there is a significant change to the
-        cutoff_radius: float = 5.0,
         default_dtype="float32",
-        delta_lambda: float = None,
         **kwargs):
         Calculator.__init__(self, **kwargs)
         self.results = {}
-
-        self.model = torch.load(f=model_path, map_location=device)
-        self.model = jit.script(self.model)
+        self.model = jit.script(torch.load(f=model_path, map_location=device))
         self.r_max = float(self.model.r_max)
-        self.lmbda = lmbda
-        self.original_lambda = lmbda
-        # indices of the ligand atoms
-        self.stateA_idx = stateA_idx
-        self.delta_lambda = delta_lambda
+        self.lambda_schedule = lambda_schedule
+        self.ligA_idx = ligA_idx
         self.device = torch_tools.init_device(device)
         self.energy_units_to_eV = energy_units_to_eV
         self.length_units_to_A = length_units_to_A
@@ -66,7 +46,8 @@ class NEQ_MACE_AFE_Calculator(Calculator):
         )
         torch_tools.set_default_dtype(default_dtype)
         self.step_counter = 0
-        self.nl_cache = {}
+        self.nl_cache = []
+        
     # pylint: disable=dangerous-default-value
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
         """
@@ -76,17 +57,20 @@ class NEQ_MACE_AFE_Calculator(Calculator):
         :param system_changes: [str], system changes since last calculation, used by ASE internally
         :return:
         """
-        solvent_idx = [i for i in range(len(atoms)) if i not in self.stateA_idx]
+        solvent_idx = [i for i in range(len(atoms)) if i not in self.ligA_idx]
         solvent_atoms = atoms[solvent_idx]
-        stateA_solute = atoms[self.stateA_idx]
+        stateA_solute = atoms[self.ligA_idx]
         stateA = stateA_solute + solvent_atoms
-        all_atoms = [
+        self.all_atoms = [
             stateA,
             stateA_solute,
             solvent_atoms,
         ]
+        if len(self.nl_cache) == 0:
+            self.update_nl()
         # if lambda = 0, we don't need to evaluate the full system, just the components
-        if self.lmbda == 0 and self.delta_lambda == 0:
+        # if self.lmbda == 0 and self.delta_lambda == 0:
+        if self.lambda_schedule.delta == 0 and self.lambda_schedule.start == 0:
             # running equilbrium simulation of the decoupled system
             all_atoms = [stateA_solute, solvent_atoms]
             # now set zeroes in the appropriate places
@@ -94,29 +78,18 @@ class NEQ_MACE_AFE_Calculator(Calculator):
             stateA.info["energy"] = 0
             stateA.info["free_energy"] = 0
 
-
-        for idx, at in enumerate(all_atoms):
+        for idx, at in enumerate(self.all_atoms):
             # call to base-class to set atoms attribute
             Calculator.calculate(self, at)
 
             # prepare data
-            config = data.config_from_atoms(at)
+            self.config = data.config_from_atoms(at)
             # extract the neighbourlist from cache, unless we're every N steps, in which case update it
-            if self.step_counter % 20 != 0 and idx in self.nl_cache.keys():
-                edge_index, shifts, unit_shifts = self.nl_cache[idx]
-                nl = (edge_index, shifts, unit_shifts)
-            else:
-                nl = get_neighborhood(
-                    positions=config.positions,
-                    cutoff=self.r_max,
-                    pbc=config.pbc,
-                    cell=config.cell,
-                )
-                self.nl_cache[idx] = nl
+            nl = self.nl_cache[idx]
             data_loader = torch_geometric.dataloader.DataLoader(
                 dataset=[
                     AtomicData.from_config(
-                        config, z_table=self.z_table, cutoff=self.r_max, nl=nl
+                        self.config, z_table=self.z_table, cutoff=self.r_max, nl=nl
                     )
                 ],
                 batch_size=1,
@@ -139,7 +112,7 @@ class NEQ_MACE_AFE_Calculator(Calculator):
             axis=0,
         )
 
-        final_forces = self.lmbda * stateA.arrays["forces"] + (1 - self.lmbda) * (
+        final_forces = self.lambda_schedule.current_lambda * stateA.arrays["forces"] + (1 - self.lambda_schedule.current_lambda) * (
             stateA_decoupled_forces
         )
         dHdL = stateA.info["energy"] - (stateA_solute.info["energy"] + solvent_atoms.info["energy"])
@@ -147,8 +120,8 @@ class NEQ_MACE_AFE_Calculator(Calculator):
             logger.debug(f"dH/dL: {dHdL}")
 
         self.results = {
-            "energy": self.lmbda * stateA.info["energy"]
-            + (1 - self.lmbda)
+            "energy": self.lambda_schedule.current_lambda * stateA.info["energy"]
+            + (1 - self.lambda_schedule.current_lambda)
             * (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
             # FIXME: This is just a hacky way to get the calculator to write things out to the atoms object
             # derivative of the energy expression  /w.r.t lambda just gives the difference between coupled nad uncoupled states
@@ -158,17 +131,26 @@ class NEQ_MACE_AFE_Calculator(Calculator):
             # TODO: Implement stresses so we can do the 
            }
 
-    def set_lambda(self, lmbda: float) -> None:
-        self.lmbda = lmbda
+    def update_nl(self):
+        for config in self.all_atoms:
+            self.nl_cache.append( get_neighborhood(
+                positions=config.positions,
+                cutoff=self.r_max,
+                pbc=config.pbc,
+                cell=config.cell,
+            ))
 
-    def get_lambda(self) -> float:
-        return self.lmbda
-
-    
-
-    def reset_lambda(self) -> None:
-        logger.debug(f"Resetting lambda to {self.original_lambda:.2f}")
-        self.lmbda = self.original_lambda
+    # def set_lambda(self, lmbda: float) -> None:
+    #     self.lmbda = lmbda
+    #
+    # def get_lambda(self) -> float:
+    #     return self.lmbda
+    #
+    #
+    #
+    # def reset_lambda(self) -> None:
+    #     logger.debug(f"Resetting lambda to {self.original_lambda:.2f}")
+    #     self.lmbda = self.original_lambda
 
 class NEQ_MACE_RFE_Calculator(Calculator):
     """MACE ASE Calculator"""
