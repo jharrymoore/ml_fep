@@ -262,7 +262,7 @@ class ReplicaExchange:
         u_ln : np.ndarray of shape (L, N)
             Reduced, non-sparse data format
             L = number of thermodynamic states
-            N = \sum_k N_k. note this is not N'
+            N = sum_k N_k. note this is not N'
         """
         k, l, n = u_kln.shape
         if n_k is None:
@@ -278,19 +278,10 @@ class ReplicaExchange:
 
     @mpiplus.on_single_node(0, broadcast_result=False)
     def online_analysis(self):
-        # use MBAR to attempt to compute free energies at this iteration, write to stdout
-        # write the mbar anaysis info the a yaml file, same as openff
-        # this function is inspired by the equivalent function from the openmmtools MultiStateSampler
         try:  # Trap errors for MBAR being under sampled and the W_nk matrix not being normalized correctly
-            # get the latest u_kln from the netcdf file [n_replicas, n_states]
             u_kln = self.reporter.variables["u_kln"][:].transpose(1,2,0)
             k, l, n = u_kln.shape
-
-
-            logger.debug(u_kln)
-
             u_kn = self.reformat_energies_for_mbar(u_kln)
-
 
             mbar = MBAR(
                 u_kn=u_kn,
@@ -298,12 +289,11 @@ class ReplicaExchange:
                 verbose=False,
             )
             free_energy, err_free_energy = mbar.getFreeEnergyDifferences()
-            logger.debug(f"Free energy: {free_energy} KT at iteration {self._current_iter}")
+            logger.debug(f"Free energy: {free_energy} eV at iteration {self._current_iter}")
             # in some arbitrary units
             free_energy = free_energy[0, -1]
             err_free_energy = err_free_energy[0, -1]
 
-            # TODO: get the timeseries, ideally we want to find the max equilibration time out of all sampled states, this just takes from the zero state and assumes that is representative
             (
                 t0,
                 statistical_inefficiency,
@@ -390,7 +380,6 @@ class ReplicaExchange:
 
 
     def _propagate_replica(self, idx) -> np.ndarray:
-        logger.debug("propagating replica")
         replica=self.replicas[idx]
         logger.debug(f"Propagating replica with lambda = {replica.l:.2f}")
         # print first row of positions before and after
@@ -409,9 +398,6 @@ class ReplicaExchange:
             for jdx, lmbda in enumerate([r.l for r in self.replicas]):
                 replica.atoms.calc.set_lambda(lmbda)
                 all_energies[idx, jdx] = replica.atoms.get_potential_energy()
-                logger.debug(
-                    f"Energy of replica {idx:.2f} with lambda {lmbda:.2f} at iteration {self._current_iter} is {all_energies[idx, jdx]}"
-                )
             replica.atoms.calc.reset_lambda()
         return all_energies
 
@@ -505,11 +491,6 @@ class ReplicaExchange:
         u_ji = self.energies_last_iteration[replica_j, replica_i]
         u_ii = self.energies_last_iteration[replica_i, replica_i]
         u_jj = self.energies_last_iteration[replica_j, replica_j]
-
-        print("u_ij",  u_ij)
-        print("u_ji", u_ji)
-        print("u_ii", u_ii)
-        print("u_jj", u_jj)
 
         # logP = 0 if the replicas if we end up with the same i and j
         log_p = -(u_ij + u_ji) + u_ii + u_jj

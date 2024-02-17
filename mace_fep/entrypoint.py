@@ -104,8 +104,6 @@ def main():
             all_atoms.append(atoms)
     else:
         raise ValueError("mode must be NEQ or EQ")
-
-
     constrain_atoms_idx = []
     if args.ligA_const is not None:
         constrain_atoms_idx.append(args.ligA_const)
@@ -113,13 +111,12 @@ def main():
         constrain_atoms_idx.append(args.ligB_const)
 
     if args.mode == "EQ":
-        replicas = [Replica(ats, idx, l) for idx, (ats, l) in enumerate(zip(all_atoms, np.linspace(0, 1, args.replicas)))]
+        replicas = [Replica(ats, idx, l, output_dir=args.output, write_interval=args.report_interval) for idx, (ats, l) in enumerate(zip(all_atoms, np.linspace(0, 1, args.replicas)))]
         sampler = ReplicaExchange(
             replicas=replicas,
-            steps_per_iter=args.steps,
+            steps_per_iter=args.steps_per_iter,
             iters=args.iters,
             output_dir=args.output,
-            # report_interval=args.report_interval
             dtype=args.dtype,
             no_mixing=args.no_mixing,
             restart=args.restart,
