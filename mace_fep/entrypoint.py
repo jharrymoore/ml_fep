@@ -1,14 +1,16 @@
+from copy import deepcopy
 from typing import Tuple
-from mace_fep.calculators import NEQ_MACE_AFE_Calculator
+from mace_fep.calculators import NEQ_MACE_AFE_Calculator, EQ_MACE_AFE_Calculator
 from mace_fep.lambda_schedule import LambdaSchedule
 
 import logging
 import os
+import numpy as np
 from mace.tools import set_default_dtype
 from ase.io import read
 from ase import Atoms
-from mace_fep.system import NEQSystem
-
+from mace_fep.protocols import NonEquilibriumSwitching, ReplicaExchange
+from mace_fep.replica import Replica
 from mace_fep.utils import parse_arguments, setup_logger
 
 log_level = {
@@ -69,29 +71,40 @@ def main():
         delta_lambda = 1.0 / args.steps if not args.reverse else -1.0 / args.steps
     logger.info(f"Delta lambda: {delta_lambda}")
 
-    lambda_schedule = LambdaSchedule(start=last_recorded_step,
+
+    if args.mode == "NEQ":
+        lambda_schedule = LambdaSchedule(start=last_recorded_step,
                                      delta=delta_lambda,
                                      n_steps=steps_remaining,
                                      use_ssc=args.use_ssc)
+        fep_calc = NEQ_MACE_AFE_Calculator(
+            model_path=args.model_path,
+            ligA_idx=ligA_idx,
+            default_dtype=args.dtype,
+            device=args.device,
+            lambda_schedule=lambda_schedule,
+        )
+        atoms.set_calculator(fep_calc)
+    elif args.mode == "EQ":
+        all_atoms = []
+        # TODO: this takes the same model for all replicas, not the lambda dependent scheme
+        model_paths = [args.model_path for _ in range(args.replicas)]
+        for idx, l in enumerate(np.linspace(0, 1, args.replicas)):
+            # assuming linear lambda span in the first instance
+            model = model_paths[idx]
+            atoms = deepcopy(atoms)
+            calc = EQ_MACE_AFE_Calculator(
+                model_path = model,
+                ligA_idx = ligA_idx,
+                default_dtype=args.dtype,
+                device=args.device,
+                l=l,
+            )
+            atoms.set_calculator(calc)
+            all_atoms.append(atoms)
+    else:
+        raise ValueError("mode must be NEQ or EQ")
 
-    # if args.mode == "absolute":
-    #     fep_calc = FullCalcAbsoluteMACEFEPCalculator
-    # elif args.mode == "relative":
-    #     fep_calc = FullCalcMACEFEPCalculator
-    # elif args.mode == "NEQAbsolute":
-    fep_calc = NEQ_MACE_AFE_Calculator(
-        model_path=args.model_path,
-        ligA_idx=ligA_idx,
-        default_dtype=args.dtype,
-        device=args.device,
-        lambda_schedule=lambda_schedule,
-    )
-    # elif args.mode == "NEQRelative":
-    #     raise NotImplementedError("NEQRelative not implemented")
-    # else:
-        # raise ValueError("mode must be absolute or relative")
-
-    atoms.set_calculator(fep_calc)
 
     constrain_atoms_idx = []
     if args.ligA_const is not None:
@@ -99,14 +112,25 @@ def main():
     if args.ligB_const is not None:
         constrain_atoms_idx.append(args.ligB_const)
 
-    if args.mode in ["EQRelative", "EQAbsolute"]:
-        raise NotImplementedError("EQRelative and EQAbsolute not implemented")
-    elif args.mode in ["NEQAbsolute", "NEQRelative"]:
-        sampler =NEQSystem(
+    if args.mode == "EQ":
+        replicas = [Replica(ats, idx, l) for idx, (ats, l) in enumerate(zip(all_atoms, np.linspace(0, 1, args.replicas)))]
+        sampler = ReplicaExchange(
+            replicas=replicas,
+            steps_per_iter=args.steps,
+            iters=args.iters,
+            output_dir=args.output,
+            # report_interval=args.report_interval
+            dtype=args.dtype,
+            no_mixing=args.no_mixing,
+            restart=args.restart,
+        )
+    elif args.mode  == "NEQ":
+        sampler = NonEquilibriumSwitching(
             atoms=atoms,
             total_steps=args.steps,
             constrain_atoms_idx=constrain_atoms_idx,
             output_dir=args.output,
+            report_interval=args.report_interval
         )
     else:
         raise ValueError(f"Did not recognise mode {args.mode}")

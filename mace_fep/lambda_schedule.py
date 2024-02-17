@@ -7,6 +7,7 @@ class LambdaSchedule:
         self.delta = delta
         self.n_steps = n_steps
         self.current_lambda = start
+        self.output_lambda = start
         self.transform = self.ssc_lambda if use_ssc else self.linear
         
     def __iter__(self):
@@ -24,7 +25,7 @@ class LambdaSchedule:
     def __next__(self):
         output = self.transform(self.current_lambda)
         self.current_lambda += self.delta
-        return output
+        self.output_lambda = output
             
 
 

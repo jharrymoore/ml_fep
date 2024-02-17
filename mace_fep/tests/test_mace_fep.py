@@ -1,6 +1,6 @@
 from mace_fep.lambda_schedule import LambdaSchedule
 from mace_fep.calculators import NEQ_MACE_AFE_Calculator
-from mace_fep.system import NEQSystem
+from mace_fep.protocols import NonEquilibriumSwitching
 import pytest
 import os
 from ase.io import read
@@ -23,7 +23,7 @@ def test_run_neq(use_ssc: bool):
     atoms = read(os.path.join(TEST_DIR, "methanol_solvated.xyz"))
     atoms.set_calculator(fep_calc)
 
-    sampler = NEQSystem(
+    sampler = NonEquilibriumSwitching(
         atoms=atoms,
         total_steps=10,
         constrain_atoms_idx=[],
@@ -31,7 +31,6 @@ def test_run_neq(use_ssc: bool):
     )
 
     sampler.propagate()
-
 
     assert os.path.isfile("junk/output_replica_0.xyz")
     assert np.isclose(sampler.integrator.atoms.calc.lambda_schedule.current_lambda, 1.1)
@@ -61,3 +60,8 @@ def test_linear_lambda_schedule(use_ssc: bool, reverse: bool):
 
 
 
+
+
+
+def test_repex():
+    pass
