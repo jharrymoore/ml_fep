@@ -65,14 +65,14 @@ def main():
     atoms, last_recorded_step = setup_atoms(args.restart, args.file, args.output)
     steps_remaining = args.steps - last_recorded_step
 
-    if args.equilibrate:
-        delta_lambda = 0.0
-    else:
-        delta_lambda = 1.0 / args.steps if not args.reverse else -1.0 / args.steps
-    logger.info(f"Delta lambda: {delta_lambda}")
 
 
     if args.mode == "NEQ":
+        if args.equilibrate:
+            delta_lambda = 0.0
+        else:
+            delta_lambda = 1.0 / args.steps if not args.reverse else -1.0 / args.steps
+        logger.info(f"Delta lambda: {delta_lambda}")
         lambda_schedule = LambdaSchedule(start=last_recorded_step,
                                      delta=delta_lambda,
                                      n_steps=steps_remaining,
@@ -111,7 +111,12 @@ def main():
         constrain_atoms_idx.append(args.ligB_const)
 
     if args.mode == "EQ":
-        replicas = [Replica(ats, idx, l, output_dir=args.output, write_interval=args.report_interval) for idx, (ats, l) in enumerate(zip(all_atoms, np.linspace(0, 1, args.replicas)))]
+        replicas = [Replica(atoms=ats,
+                            idx=idx,
+                            l=l,
+                            output_dir=args.output,
+                            write_interval=args.report_interval,
+                            total_steps=args.steps_per_iter * args.iters) for idx, (ats, l) in enumerate(zip(all_atoms, np.linspace(0, 1, args.replicas)))]
         sampler = ReplicaExchange(
             replicas=replicas,
             steps_per_iter=args.steps_per_iter,

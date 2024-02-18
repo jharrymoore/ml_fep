@@ -355,9 +355,6 @@ class ReplicaExchange:
             self.online_analysis()
 
             # check for nan values in coords
-            # print(self._current_iter)
-            # print(self.reporter.variables["positions"].shape)
-            # coords = self.reporter.variables["positions"][self._current_iter]
             self._current_iter += 1
             logger.debug(f"Current iter now {self._current_iter}")
             # if np.isnan(coords).any():
