@@ -3,8 +3,13 @@ from ase.md.langevin import Langevin
 from ase import units
 import time
 import datetime
+from datetime import date
 import os
 import numpy as np
+import logging
+
+
+logger = logging.getLogger("mace_fep")
 
 
 densfact = (units.m/1.0e2)**3/units.mol
@@ -26,6 +31,8 @@ class Replica:
         self.l = l
         self.checkpoint_time = time.time()
         self.total_steps=total_steps
+        self.header = '   Time(fs)     Latency(ns/day)    Temperature(K)      Density(g/cm$^3$)        Energy(eV)        MSD(A$^2$)       COMSD(A$^2$)   Volume(cm$^3$)   Time remaining\n'
+        self.output_dir=output_dir
 
         self.integrator = Langevin(
             self.atoms,
@@ -60,20 +67,17 @@ class Replica:
             calc_time = self.integrator.get_time()/units.fs
             calc_temp = a.get_temperature()
             calc_dens = np.sum(a.get_masses())/a.get_volume()*densfact
-            # calc_pres = -np.trace(a.get_stress(include_ideal_gas=True, voigt=False))/3/units.bar if self.integrator.__class__.__name__ == 'NPT' else np.zeros(1)
             calc_epot = a.get_potential_energy()
             dhdl = a.get_potential_energy(force_consistent=True)
             calc_msd  = (((a.positions-a.get_center_of_mass())-(start_config_positions-start_config_com))**2).mean(0).sum(0)
             calc_drft = ((a.get_center_of_mass()-start_config_com)**2).sum(0)
-            # calc_tens = -a.get_stress(include_ideal_gas=True, voigt=True)/units.bar if self.integrator.__class__.__name__ == 'NPT' else np.zeros(6)
             calc_volume = a.get_volume() * densfact
             a.info['step'] = self.integrator.nsteps
             a.info['time_fs'] = self.integrator.get_time()/units.fs
             a.info['time_ps'] = self.integrator.get_time()/units.fs/1000
-            with open(os.path.join(output_dir, "thermo_traj.dat"), 'a') as thermo_traj:
-                thermo_traj.write(('%12.1f'+' %17.6f'*8+'    %s'+'\n') % (calc_time, ns_per_day, calc_temp,current_lambda, calc_dens, calc_epot, calc_msd, calc_drft, calc_volume, time_remaining ))
+            with open(os.path.join(output_dir, f"thermo_traj_{self.idx}.dat"), 'a') as thermo_traj:
+                thermo_traj.write(('%12.1f'+' %17.6f'*7+'    %s'+'\n') % (calc_time, ns_per_day, calc_temp, calc_dens, calc_epot, calc_msd, calc_drft, calc_volume, time_remaining ))
                 thermo_traj.flush()
-            print(('%12.1f'+' %17.6f'*8+ '    %s') % (calc_time, ns_per_day, calc_temp, current_lambda, calc_dens, calc_epot, calc_msd, calc_drft, calc_volume, time_remaining), flush=True)
             with open(os.path.join(output_dir, "dhdl.xvg"), 'a') as xvg:
                 time_ps = calc_time 
                 xvg.write(f"{time_ps:.4f} {dhdl:.6f}\n")
@@ -82,6 +86,11 @@ class Replica:
         self.integrator.attach(update_nl, interval=1)
         self.integrator.attach(print_traj, interval=write_interval)
     def propagate(self, n_steps: int):
+
+        with open(os.path.join(self.output_dir, f"thermo_traj_{self.idx}.dat"), 'a') as thermo_traj:
+            thermo_traj.write('# ASE Dynamics. Date: '+date.today().strftime("%d %b %Y")+'\n')
+            thermo_traj.write(self.header)
+            print('# ASE Dynamics. Date: '+date.today().strftime("%d %b %Y"))
         self.integrator.run(n_steps)
 
 

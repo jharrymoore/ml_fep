@@ -149,7 +149,6 @@ class NonEquilibriumSwitching:
             with open(os.path.join(self.output_dir, "thermo_traj.dat"), 'a') as thermo_traj:
                 thermo_traj.write('# ASE Dynamics. Date: '+date.today().strftime("%d %b %Y")+'\n')
                 thermo_traj.write(self.header)
-                print('# ASE Dynamics. Date: '+date.today().strftime("%d %b %Y"))
             with open(os.path.join(self.output_dir, "dhdl.xvg"), 'a') as dhdl:
                 dhdl.write('# Time (ps) dH/dL\n')
             
@@ -183,6 +182,7 @@ class ReplicaExchange:
         self._iter_time = 0.0
         self.dtype = dtype
         self.no_mixing = no_mixing
+        self.current_free_energy = 0.0
 
         if constrain_atoms_idx is not None: 
             c = FixAtoms(indices=constrain_atoms_idx)
@@ -292,6 +292,7 @@ class ReplicaExchange:
             logger.debug(f"Free energy: {free_energy} eV at iteration {self._current_iter}")
             # in some arbitrary units
             free_energy = free_energy[0, -1]
+            self.curr_free_energy = free_energy
             err_free_energy = err_free_energy[0, -1]
 
             (
@@ -320,7 +321,6 @@ class ReplicaExchange:
             logger.warning(f"MBAR analysis failed: {e}")
 
     def propagate(self) -> None:
-        logger.debug("Current iter is {}".format(self._current_iter))
         if self._current_iter == 0:
             # get the initial energies
             logger.info("Computing inintial energies")
@@ -341,7 +341,7 @@ class ReplicaExchange:
             self.propagate_replicas()
             t2 = time.time()
             logger.info(
-                f"Propagated {self.replicas} replicas for {self.steps_per_iter} steps in {t2-t1:.4f} seconds"
+                f"Propagated {len(self.replicas)} replicas for {self.steps_per_iter} steps in {t2-t1:.4f} seconds"
             )
             logger.debug("Computing energies")
             self.energies_last_iteration = self.compute_energies()
@@ -356,7 +356,6 @@ class ReplicaExchange:
 
             # check for nan values in coords
             self._current_iter += 1
-            logger.debug(f"Current iter now {self._current_iter}")
             # if np.isnan(coords).any():
             #     logger.error("NaN values in coordinates, exiting")
             #     break
@@ -365,33 +364,24 @@ class ReplicaExchange:
         self.reporter.close()
 
     def propagate_replicas(self) -> None:
-        # run the mace FEP calculator for each replica, each on a separate MPI rank
         positions = mpiplus.distribute(
             self._propagate_replica, range(len(self.replicas)), send_results_to="all", sync_nodes=True
         )
-
-
-        # set the new positions
         for idx, replica in enumerate(self.replicas):
             replica.atoms.set_positions(positions[idx])
 
 
     def _propagate_replica(self, idx) -> np.ndarray:
         replica=self.replicas[idx]
-        logger.debug(f"Propagating replica with lambda = {replica.l:.2f}")
-        # print first row of positions before and after
-        # this is all stateful, the atoms object has stuff updated in place.
         replica.propagate(self.steps_per_iter)
         return replica.atoms.get_positions()
 
     @mpiplus.on_single_node(0, broadcast_result=True)
     def compute_energies(self) -> np.ndarray:
-        # extract energies from each replica - get this from the atoms object
         all_energies = np.zeros([len(self.replicas), len(self.replicas)])
         logger.info("Computing energies for all replicas")
 
         for idx, replica in enumerate(self.replicas):
-            # this is a little complex, I think the easiest, to avoid getting and setting lots of np arrays, is to have the calculator do an energy evaluation on those position over the range of lambda values, that should be its own method since it should be super easy to do
             for jdx, lmbda in enumerate([r.l for r in self.replicas]):
                 replica.atoms.calc.set_lambda(lmbda)
                 all_energies[idx, jdx] = replica.atoms.get_potential_energy()
