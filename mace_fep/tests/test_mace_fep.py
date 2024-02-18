@@ -1,6 +1,8 @@
+from copy import deepcopy
 from mace_fep.lambda_schedule import LambdaSchedule
-from mace_fep.calculators import NEQ_MACE_AFE_Calculator
-from mace_fep.protocols import NonEquilibriumSwitching
+from mace_fep.calculators import EQ_MACE_AFE_Calculator, NEQ_MACE_AFE_Calculator
+from mace_fep.protocols import NonEquilibriumSwitching, ReplicaExchange
+from mace_fep.replica import Replica
 import pytest
 import os
 from ase.io import read
@@ -50,18 +52,54 @@ def test_linear_lambda_schedule(use_ssc: bool, reverse: bool):
 
     schedule =LambdaSchedule(start=start, delta=delta, n_steps=10, use_ssc=use_ssc)
     output_values = np.linspace(0, 1, 11) if not reverse else np.linspace(1, 0, 11)
-    print(output_values)
     
     if use_ssc:
         output_values = [ssc_lambda(i) for i in output_values] 
 
     for i in range(10):
-        assert np.isclose(next(schedule), output_values[i])
+        next(schedule)
+        
+        assert np.isclose(schedule.output_lambda, output_values[i])
 
 
 
 
 
+@pytest.mark.parametrize("no_mixing", [True, False])
+def test_repex(no_mixing):
+    atoms = read(os.path.join(TEST_DIR, "methanol_solvated.xyz"))
+    os.makedirs("junk", exist_ok=True)
+    replicas = []
 
-def test_repex():
-    pass
+    for idx, l in enumerate(np.linspace(0, 1, 4)):
+        atoms = deepcopy(atoms)
+        calc = EQ_MACE_AFE_Calculator(
+            model_path=os.path.join(TEST_DIR, "l1_swa.model"),
+            ligA_idx = [0,1,2,3,4,5],
+            default_dtype="float32",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            l=l,
+        )
+        atoms.set_calculator(calc)
+        replicas.append(
+            Replica(atoms=atoms,
+                idx=idx,
+                l=l,
+                output_dir="junk",
+                total_steps=100)
+    )
+
+    sampler = ReplicaExchange(
+        output_dir="junk",
+        iters=10,
+        steps_per_iter=10,
+        replicas=replicas,
+        restart=False,
+        dtype=torch.float32,
+        no_mixing=no_mixing,
+    )
+    sampler.propagate()
+    
+
+    assert np.isfinite(sampler.current_free_energy)
+    assert sampler.current_free_energy < 0.0
