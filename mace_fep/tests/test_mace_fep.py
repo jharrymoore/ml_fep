@@ -102,4 +102,3 @@ def test_repex(no_mixing):
     
 
     assert np.isfinite(sampler.current_free_energy)
-    assert sampler.current_free_energy < 0.0

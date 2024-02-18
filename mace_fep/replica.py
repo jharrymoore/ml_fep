@@ -57,7 +57,7 @@ class Replica:
             current_time = time.time()
             time_elapsed = current_time - self.checkpoint_time
             # steps per second
-            steps_per_day = (1/time_elapsed) * 86400
+            steps_per_day = (1/time_elapsed) * 86400 * write_interval
             ns_per_day = steps_per_day * timestep * 1e-6
             time_remaining_seconds = (self.total_steps - self.integrator.nsteps) / (steps_per_day / 86400)
             # format to days:hours:minutes:seconds
