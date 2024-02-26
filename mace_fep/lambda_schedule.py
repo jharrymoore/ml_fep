@@ -1,5 +1,7 @@
 import logging
+
 logger = logging.getLogger("mace_fep")
+
 
 class LambdaSchedule:
     def __init__(self, start: float, delta: float, n_steps: int, use_ssc: bool):
@@ -9,7 +11,7 @@ class LambdaSchedule:
         self.current_lambda = start
         self.output_lambda = start
         self.transform = self.ssc_lambda if use_ssc else self.linear
-        
+
     def __iter__(self):
         return self
 
@@ -26,6 +28,3 @@ class LambdaSchedule:
         output = self.transform(self.current_lambda)
         self.current_lambda += self.delta
         self.output_lambda = output
-            
-
-
