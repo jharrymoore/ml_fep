@@ -246,11 +246,10 @@ class ReplicaExchange:
                 self.energies_last_iteration = energies_last_iteration
                 self._current_iter = n_steps + 1
                 for idx, replica in enumerate(self.replicas):
-                    atoms = replica.atoms
-                    atoms.set_positions(coords[idx])
-                    atoms.set_velocities(velocities[idx])
+                    replica.atoms.set_positions(coords[idx])
+                    replica.atoms.set_velocities(velocities[idx])
                     logger.debug(f"Setting replica {idx} lambda to {lambda_vals[idx]}")
-                    atoms.calc.set_lambda(lambda_vals[idx])
+                    replica.atoms.calc.set_lambda(lambda_vals[idx])
             except OSError as e:
                 logger.error(f"Could not restart from latest: {e}")
                 self._initialise_storage_file(output_dir)
@@ -261,19 +260,14 @@ class ReplicaExchange:
 
     @mpiplus.on_single_node(0, broadcast_result=True, sync_nodes=True)
     def _restart_from_latest(self):
-        # take the positions from the netcdf file, TODO: reload the lambda positions once the replica mixing works
-        # open the netcdf file for reading
         self.reporter = netCDF4.Dataset(os.path.join(self.output_dir, "repex.nc"), "r+")
-        # get the positions from the last iteration
         n_steps = self.reporter.dimensions["iteration"].size
         logger.info(f"Found last iteration: {n_steps}")
-        # this is only propagated to the root node, we need to broadcast this to all nodes
 
         coords = self.reporter.variables["positions"][-1]
         velocities = self.reporter.variables["velocities"][-1]
         lambda_vals = self.reporter.variables["lambda_vals"][-1]
 
-        # set the energies last iteration
         energies_last_iteration = self.reporter.variables["u_kln"][-1]
 
         return (energies_last_iteration, n_steps, coords, velocities, lambda_vals)
@@ -488,7 +482,7 @@ class ReplicaExchange:
         self.reporter.createDimension("n_atoms", len(self.replicas[0].atoms))
         self.reporter.createDimension("n_dims", 3)
 
-        self.reporter.createVariable("u_kln", "f8", ("iteration", "replica", "lambda"))
+        self.reporter.createVariable("energies", "f8", ("iteration", "replica", "lambda"))
         self.reporter.createVariable("iter_time", "f8", ("iteration",))
         self.reporter.createVariable(
             "positions", "f8", ("iteration", "replica", "n_atoms", "n_dims")
