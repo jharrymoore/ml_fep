@@ -1,6 +1,6 @@
 from copy import deepcopy
 from typing import Tuple
-from mace_fep.calculators import NEQ_MACE_AFE_Calculator, EQ_MACE_AFE_Calculator
+from mace_fep.calculators import NEQ_MACE_AFE_Calculator_NEW, EQ_MACE_AFE_Calculator
 from mace_fep.lambda_schedule import LambdaSchedule
 
 import logging
@@ -77,9 +77,9 @@ def main():
                                      delta=delta_lambda,
                                      n_steps=steps_remaining,
                                      use_ssc=args.use_ssc)
-        fep_calc = NEQ_MACE_AFE_Calculator(
+        fep_calc = NEQ_MACE_AFE_Calculator_NEW(
             model_path=args.model_path,
-            ligA_idx=ligA_idx,
+            decouple_indices=ligA_idx,
             default_dtype=args.dtype,
             device=args.device,
             lambda_schedule=lambda_schedule,

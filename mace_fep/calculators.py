@@ -17,6 +17,103 @@ from mace.data import get_neighborhood
 
 logger = logging.getLogger("mace_fep")
 
+
+
+class NEQ_MACE_AFE_Calculator_NEW(Calculator):
+    """MACE ASE Calculator"""
+
+    implemented_properties = ["energy", "free_energy", "forces" ]
+
+    def __init__(
+        self,
+        model_path: str,
+        decouple_indices: List[int],
+        device: str,
+        lambda_schedule,
+        energy_units_to_eV: float = 1.0,
+        length_units_to_A: float = 1.0,
+        default_dtype="float32",
+        **kwargs):
+        Calculator.__init__(self, **kwargs)
+        self.results = {}
+        self.model = jit.script(torch.load(f=model_path, map_location=device))
+        self.r_max = float(self.model.r_max)
+        self.lambda_schedule = lambda_schedule
+        self.device = torch_tools.init_device(device)
+        self.energy_units_to_eV = energy_units_to_eV
+        self.length_units_to_A = length_units_to_A
+        self.z_table = utils.AtomicNumberTable(
+            [int(z) for z in self.model.atomic_numbers]
+        )
+        torch_tools.set_default_dtype(default_dtype)
+        self.step_counter = 0
+        self.nl_cache = []
+        self.decouple_indices=decouple_indices
+        
+    # pylint: disable=dangerous-default-value
+    def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+        """
+        Calculate properties.
+        :param atoms: ase.Atoms object
+        :param properties: [str], properties to be computed, used by ASE internally
+        :param system_changes: [str], system changes since last calculation, used by ASE internally
+        :return:
+        """
+       
+        # if lambda = 0, we don't need to evaluate the full system, just the components
+        # if self.lmbda == 0 and self.delta_lambda == 0:
+            # running equilbrium simulation of the decoupled system
+            # now set zeroes in the appropriate places
+
+            # call to base-class to set atoms attribute
+        Calculator.calculate(self, atoms)
+
+        # prepare data
+        self.config = data.config_from_atoms(atoms)
+        # extract the neighbourlist from cache, unless we're every N steps, in which case update it
+        # nl = self.nl_cache[idx]
+        data_loader = torch_geometric.dataloader.DataLoader(
+            dataset=[
+                AtomicData.from_config(
+                    self.config, z_table=self.z_table, cutoff=self.r_max
+                )
+            ],
+            batch_size=1,
+            shuffle=False,
+            drop_last=False,
+        )
+        batch = next(iter(data_loader)).to(self.device)
+        
+        out = self.model(batch.to_dict(), compute_stress=False, lmbda=self.lambda_schedule.output_lambda, decouple_indices=self.decouple_indices)
+        energy = out["interaction_energy"].detach().cpu().item() * self.energy_units_to_eV
+        forces = out["forces"].detach().cpu().numpy() * self.energy_units_to_eV / self.length_units_to_A
+        dhdl = out["dhdl"].detach().cpu().numpy() * self.energy_units_to_eV
+        # attach to internal atoms object.  These should still be accessible after the loop
+      
+
+        stateA_decoupled_forces = np.concatenate(
+            (stateA_solute.arrays["forces"], solvent_atoms.arrays["forces"]),
+            axis=0,
+        )
+        dHdL = stateA.info["energy"] - (stateA_solute.info["energy"] + solvent_atoms.info["energy"])
+        if self.step_counter % 2 == 0:
+            logger.debug(f"dH/dL: {dHdL}")
+
+        self.results = {
+            "energy": energy,
+            "free_energy": dHdL,
+            "forces":forces,
+           }
+
+    # def update_nl(self):
+    #     for config in self.all_atoms:
+    #         self.nl_cache.append( get_neighborhood(
+    #             positions=config.positions,
+    #             cutoff=self.r_max,
+    #             pbc=config.pbc,
+    #             cell=config.cell,
+    #         ))
+
 class NEQ_MACE_AFE_Calculator(Calculator):
     """MACE ASE Calculator"""
 
