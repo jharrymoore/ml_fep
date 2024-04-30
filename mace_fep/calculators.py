@@ -117,7 +117,7 @@ class NEQ_MACE_AFE_Calculator_NEW(Calculator):
 class NEQ_MACE_AFE_Calculator(Calculator):
     """MACE ASE Calculator"""
 
-    implemented_properties = ["energy", "free_energy", "forces" ]
+    implemented_properties = ["energy", "free_energy", "forces"]
 
     def __init__(
         self,
@@ -128,7 +128,8 @@ class NEQ_MACE_AFE_Calculator(Calculator):
         energy_units_to_eV: float = 1.0,
         length_units_to_A: float = 1.0,
         default_dtype="float32",
-        **kwargs):
+        **kwargs,
+    ):
         Calculator.__init__(self, **kwargs)
         self.results = {}
         self.model = jit.script(torch.load(f=model_path, map_location=device))
@@ -144,7 +145,7 @@ class NEQ_MACE_AFE_Calculator(Calculator):
         torch_tools.set_default_dtype(default_dtype)
         self.step_counter = 0
         self.nl_cache = []
-        
+
     # pylint: disable=dangerous-default-value
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
         """
@@ -194,7 +195,7 @@ class NEQ_MACE_AFE_Calculator(Calculator):
                 drop_last=False,
             )
             batch = next(iter(data_loader)).to(self.device)
-            
+
             out = self.model(batch.to_dict(), compute_stress=False)
             energy = out["interaction_energy"].detach().cpu().item()
             forces = out["forces"].detach().cpu().numpy()
@@ -209,30 +210,35 @@ class NEQ_MACE_AFE_Calculator(Calculator):
             axis=0,
         )
 
-        final_forces = self.lambda_schedule.output_lambda * stateA.arrays["forces"] + (1 - self.lambda_schedule.output_lambda ) * (
-            stateA_decoupled_forces
+        final_forces = self.lambda_schedule.output_lambda * stateA.arrays["forces"] + (
+            1 - self.lambda_schedule.output_lambda
+        ) * (stateA_decoupled_forces)
+        dHdL = stateA.info["energy"] - (
+            stateA_solute.info["energy"] + solvent_atoms.info["energy"]
         )
-        dHdL = stateA.info["energy"] - (stateA_solute.info["energy"] + solvent_atoms.info["energy"])
         if self.step_counter % 2 == 0:
             logger.debug(f"dH/dL: {dHdL}")
 
         self.results = {
             "energy": self.lambda_schedule.output_lambda * stateA.info["energy"]
-            + (1 - self.lambda_schedule.output_lambda )
+            + (1 - self.lambda_schedule.output_lambda)
             * (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
             "free_energy": stateA.info["energy"]
             - (stateA_solute.info["energy"] + solvent_atoms.info["energy"]),
             "forces": final_forces,
-           }
+        }
 
     def update_nl(self):
         for config in self.all_atoms:
-            self.nl_cache.append( get_neighborhood(
-                positions=config.positions,
-                cutoff=self.r_max,
-                pbc=config.pbc,
-                cell=config.cell,
-            ))
+            self.nl_cache.append(
+                get_neighborhood(
+                    positions=config.positions,
+                    cutoff=self.r_max,
+                    pbc=config.pbc,
+                    cell=config.cell,
+                )
+            )
+
 
 # class NEQ_MACE_RFE_Calculator(Calculator):
 #     """MACE ASE Calculator"""
@@ -286,7 +292,7 @@ class NEQ_MACE_AFE_Calculator(Calculator):
 #         if self.step_counter % 2 == 0:
 #             self.lmbda += self.delta_lambda
 #             logger.debug(f"Step: {self.step_counter}, lambda: {self.lmbda:.4f}")
-#         
+#
 #
 #         # solvent atoms indexed in the main atoms reference frame
 #         solvent_idx = [
@@ -294,7 +300,7 @@ class NEQ_MACE_AFE_Calculator(Calculator):
 #         ]
 #
 #         # TODO: doing these copy ops is expensive, really we just want to cache these in the calculator, and update the positions only
-#         # can we get away with not making copies of the system at each step? we want to compute properties on the same atoms, but maybe call them different things? 
+#         # can we get away with not making copies of the system at each step? we want to compute properties on the same atoms, but maybe call them different things?
 #
 #         solvent_atoms = atoms[solvent_idx]
 #         stateA_solute = atoms[self.stateA_idx]
@@ -389,11 +395,12 @@ class NEQ_MACE_AFE_Calculator(Calculator):
 #     def get_lambda(self) -> float:
 #         return self.lmbda
 #
-#     
+#
 #
 #     def reset_lambda(self) -> None:
 #         logger.debug(f"Resetting lambda to {self.original_lambda:.2f}")
 #         self.lmbda = self.original_lambda
+
 
 class EQ_MACE_AFE_Calculator(Calculator):
     """Calculator for equilbrium MACE FEP calculations"""
@@ -409,15 +416,16 @@ class EQ_MACE_AFE_Calculator(Calculator):
         energy_units_to_eV: float = 1.0,
         length_units_to_A: float = 1.0,
         default_dtype="float32",
-        **kwargs):
+        **kwargs,
+    ):
         Calculator.__init__(self, **kwargs)
         self.results = {}
 
         self.model = jit.script(torch.load(f=model_path, map_location=device))
         self.r_max = float(self.model.r_max)
         self.l = l
-        self.original_lambda =l
-        self.ligA_idx= ligA_idx
+        self.original_lambda = l
+        self.ligA_idx = ligA_idx
         self.device = torch_tools.init_device(device)
         self.energy_units_to_eV = energy_units_to_eV
         self.length_units_to_A = length_units_to_A
@@ -451,11 +459,11 @@ class EQ_MACE_AFE_Calculator(Calculator):
             self.update_nl()
         # if self.l == 0:
         #     # don't require anything but the decoupled state
-        #     self.all_atoms = [stateA_solute, solvent_atoms] 
+        #     self.all_atoms = [stateA_solute, solvent_atoms]
         #     stateA.arrays["forces"] = np.zeros((len(stateA), 3))
         #     stateA.info["energy"] = 0
         #     stateA.info["free_energy"] = 0
-        #     
+        #
 
         for idx, at in enumerate(self.all_atoms):
             # call to base-class to set atoms attribute
@@ -493,7 +501,9 @@ class EQ_MACE_AFE_Calculator(Calculator):
         final_forces = self.l * stateA.arrays["forces"] + (1 - self.l) * (
             stateA_decoupled_forces
         )
-        dHdL = stateA.info["energy"] - (stateA_solute.info["energy"] + solvent_atoms.info["energy"])
+        dHdL = stateA.info["energy"] - (
+            stateA_solute.info["energy"] + solvent_atoms.info["energy"]
+        )
 
         self.results = {
             "energy": self.l * stateA.info["energy"]
@@ -504,24 +514,27 @@ class EQ_MACE_AFE_Calculator(Calculator):
         }
 
     def set_lambda(self, lmbda: float) -> None:
-        self.l= lmbda
+        self.l = lmbda
 
     def get_lambda(self) -> float:
         return self.l
 
     def update_nl(self):
+        self.nl_cache = []
         for config in self.all_atoms:
-            self.nl_cache.append( get_neighborhood(
-                positions=config.positions,
-                cutoff=self.r_max,
-                pbc=config.pbc,
-                cell=config.cell,
-            ))
-    
+            self.nl_cache.append(
+                get_neighborhood(
+                    positions=config.positions,
+                    cutoff=self.r_max,
+                    pbc=config.pbc,
+                    cell=config.cell,
+                )
+            )
 
     def reset_lambda(self) -> None:
         logger.debug(f"Resetting lambda to {self.original_lambda:.2f}")
-        self.l= self.original_lambda
+        self.l = self.original_lambda
+
 
 #
 # class FullCalcMACEFEPCalculator(Calculator):
@@ -584,7 +597,7 @@ class EQ_MACE_AFE_Calculator(Calculator):
 #         ]
 #
 #         # TODO: doing these copy ops is expensive, really we just want to cache these in the calculator, and update the positions only
-#         # can we get away with not making copies of the system at each step? we want to compute properties on the same atoms, but maybe call them different things? 
+#         # can we get away with not making copies of the system at each step? we want to compute properties on the same atoms, but maybe call them different things?
 #
 #         solvent_atoms = atoms[solvent_idx]
 #         stateA_solute = atoms[self.stateA_idx]
@@ -677,7 +690,7 @@ class EQ_MACE_AFE_Calculator(Calculator):
 #         # Not thrilled about this, this allows us to change the value and run get_potential_energy.  I would love to be able to add a trait to say get_potential_energy_at_lambda but I would need to modify atoms.
 #         logger.debug(f"Setting lambda to {lmbda:.2f}, from {self.lmbda:.2f}")
 #         self.lmbda = lmbda
-#     
+#
 #     def get_lambda(self) -> float:
 #         return self.lmbda
 #

@@ -1,4 +1,5 @@
 from copy import deepcopy
+import ast
 from typing import Tuple
 from mace_fep.calculators import NEQ_MACE_AFE_Calculator_NEW, EQ_MACE_AFE_Calculator
 from mace_fep.lambda_schedule import LambdaSchedule
@@ -26,24 +27,34 @@ log_level = {
 #
 #     self.atoms.set_calculator(fep_calc)
 
-def setup_atoms(restart: bool, xyz_file: str, output_dir: str) -> Tuple[Atoms, int]:
+
+def setup_atoms(
+    restart: bool, xyz_file: str, output_dir: str, idx: int = 0
+) -> Tuple[Atoms, int]:
     if not restart:
         atoms = read(xyz_file)
         last_recorded_step = 0
     else:
-        last_traj = os.path.join(output_dir, "output_replica_0.xyz")
+        last_traj = os.path.join(output_dir, f"output_replica_{idx}.xyz")
         atoms = read(last_traj, -1)
         last_recorded_step = atoms.info["step"]
         logging.info(f"Restarting from step {last_recorded_step} from {last_traj}")
 
         # we need to remove the frames from the dhdl + thermo file after the last timestep
-        #or maybe we just remove the duplicates after the fact
-        os.system(f"head -n {last_recorded_step+3} {output_dir}/thermo_traj.dat > {output_dir}/thermo_traj.temp")
-        os.system(f"mv {output_dir}/thermo_traj.temp {output_dir}/thermo_traj.dat")
+        # or maybe we just remove the duplicates after the fact
+        os.system(
+            f"head -n {last_recorded_step+3} {output_dir}/thermo_traj_{idx}.dat > {output_dir}/thermo_traj_{idx}.temp"
+        )
+        os.system(
+            f"mv {output_dir}/thermo_traj_{idx}.temp {output_dir}/thermo_traj_{idx}.dat"
+        )
 
-        os.system(f"head -n {last_recorded_step+2} {output_dir}/dhdl.xvg > {output_dir}/dhdl.temp")
+        os.system(
+            f"head -n {last_recorded_step+2} {output_dir}/dhdl.xvg > {output_dir}/dhdl.temp"
+        )
         os.system(f"mv {output_dir}/dhdl.temp {output_dir}/dhdl.xvg")
     return atoms, last_recorded_step
+
 
 def main():
     args = parse_arguments().parse_args()
@@ -52,8 +63,8 @@ def main():
     set_default_dtype(args.dtype)
     setup_logger(level=log_level[args.log_level], tag="mace_fep", directory=args.output)
 
-    ligA_idx = [i for i in range(0, args.ligA_idx)]
-    ligB_idx = [i for i in range(args.ligA_idx, args.ligB_idx)] if args.ligB_idx is not None else None
+    ligA_idx = range(args.ligA_idx)
+    ligB_idx = range(args.ligB_idx) if args.ligB_idx is not None else None
 
     logger.info(f"ligA_idx: {ligA_idx}")
     logger.info(f"ligB_idx: {ligB_idx}")
@@ -62,12 +73,16 @@ def main():
     if not os.path.exists(args.output):
         os.makedirs(args.output, exist_ok=True)
 
+    constrain_atoms_idx = []
+    if args.ligA_const is not None:
+        constrain_atoms_idx.append(args.ligA_const)
+    if args.ligB_const is not None:
+        constrain_atoms_idx.append(args.ligB_const)
+
     atoms, last_recorded_step = setup_atoms(args.restart, args.file, args.output)
-    steps_remaining = args.steps - last_recorded_step
-
-
-
     if args.mode == "NEQ":
+        # atoms, last_recorded_step = setup_atoms(args.restart, args.file, args.output)
+        steps_remaining = args.steps - last_recorded_step
         if args.equilibrate:
             delta_lambda = 0.0
         else:
@@ -85,38 +100,49 @@ def main():
             lambda_schedule=lambda_schedule,
         )
         atoms.set_calculator(fep_calc)
+
+        sampler = NonEquilibriumSwitching(
+            atoms=atoms,
+            total_steps=args.steps,
+            constrain_atoms_idx=constrain_atoms_idx,
+            output_dir=args.output,
+            report_interval=args.report_interval,
+        )
+
     elif args.mode == "EQ":
         all_atoms = []
         # TODO: this takes the same model for all replicas, not the lambda dependent scheme
         model_paths = [args.model_path for _ in range(args.replicas)]
-        for idx, l in enumerate(np.linspace(0, 1, args.replicas)):
-            # assuming linear lambda span in the first instance
+        lambdas = (
+            np.linspace(0, 1, args.replicas)
+            if args.lambdas is None
+            else ast.literal_eval(args.lambdas)
+        )
+        logger.debug(f"Using lambda schedule {lambdas}")
+        for idx, l in enumerate(lambdas):
             model = model_paths[idx]
             atoms = deepcopy(atoms)
             calc = EQ_MACE_AFE_Calculator(
-                model_path = model,
-                ligA_idx = ligA_idx,
+                model_path=model,
+                ligA_idx=ligA_idx,
                 default_dtype=args.dtype,
                 device=args.device,
                 l=l,
             )
             atoms.set_calculator(calc)
             all_atoms.append(atoms)
-    else:
-        raise ValueError("mode must be NEQ or EQ")
-    constrain_atoms_idx = []
-    if args.ligA_const is not None:
-        constrain_atoms_idx.append(args.ligA_const)
-    if args.ligB_const is not None:
-        constrain_atoms_idx.append(args.ligB_const)
 
-    if args.mode == "EQ":
-        replicas = [Replica(atoms=ats,
-                            idx=idx,
-                            l=l,
-                            output_dir=args.output,
-                            write_interval=args.report_interval,
-                            total_steps=args.steps_per_iter * args.iters) for idx, (ats, l) in enumerate(zip(all_atoms, np.linspace(0, 1, args.replicas)))]
+        replicas = [
+            Replica(
+                atoms=ats,
+                idx=idx,
+                l=l,
+                output_dir=args.output,
+                write_interval=args.report_interval,
+                total_steps=args.steps_per_iter * args.iters,
+            )
+            for idx, (ats, l) in enumerate(zip(all_atoms, lambdas))
+        ]
         sampler = ReplicaExchange(
             replicas=replicas,
             steps_per_iter=args.steps_per_iter,
@@ -125,14 +151,6 @@ def main():
             dtype=args.dtype,
             no_mixing=args.no_mixing,
             restart=args.restart,
-        )
-    elif args.mode  == "NEQ":
-        sampler = NonEquilibriumSwitching(
-            atoms=atoms,
-            total_steps=args.steps,
-            constrain_atoms_idx=constrain_atoms_idx,
-            output_dir=args.output,
-            report_interval=args.report_interval
         )
     else:
         raise ValueError(f"Did not recognise mode {args.mode}")

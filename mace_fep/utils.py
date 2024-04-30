@@ -28,20 +28,34 @@ def parse_arguments():
     parser.add_argument("--minimise", action="store_true")
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--log_level", type=str, default="INFO")
-    parser.add_argument("--ligA_idx", type=int, help="open interval [0, ligA_idx) selects the ligand atoms for ligA", default=None)
-    parser.add_argument("--ligB_idx", type=int, help="open interval [ligA_idx, ligB_idx) selects the ligand atoms for ligB", default=None)
+    parser.add_argument(
+        "--ligA_idx",
+        type=int,
+        help="open interval [0, ligA_idx) selects the ligand atoms for ligA",
+        default=None,
+    )
+    parser.add_argument(
+        "--ligB_idx",
+        type=int,
+        help="open interval [ligA_idx, ligB_idx) selects the ligand atoms for ligB",
+        default=None,
+    )
     parser.add_argument("--ligA_const", help="atom to constrain in ligA", type=int)
-    parser.add_argument("--ligB_const", help="atom to constrain in ligB", default=None, type=int)
+    parser.add_argument(
+        "--ligB_const", help="atom to constrain in ligB", default=None, type=int
+    )
     parser.add_argument("--mode", choices=["NEQ", "EQ"], default="NEQ")
-    parser.add_argument("--dtype", type=str, default="float64", choices=["float32", "float64"])
+    parser.add_argument(
+        "--dtype", type=str, default="float64", choices=["float32", "float64"]
+    )
     parser.add_argument("--no_mixing", action="store_true")
     parser.add_argument("--reverse", action="store_true")
     parser.add_argument("--equilibrate", action="store_true")
     parser.add_argument("--report_interval", type=int, default=100)
     parser.add_argument("--use_ssc", action="store_true")
+    parser.add_argument("--lambdas", default=None)
     parser.add_argument("--device", type=str, default="cuda")
     return parser
-
 
 
 def setup_logger(
@@ -68,7 +82,6 @@ def setup_logger(
         fh.setFormatter(formatter)
 
         logger.addHandler(fh)
-
 
 
 @contextlib.contextmanager
