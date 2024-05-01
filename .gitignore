@@ -10,4 +10,9 @@ replica_mixing
 mm_calculations/
 *.sh
 *.ipynb
-simple_test_systems/
+simple_test_systems
+repex_simulations
+simulations
+squashfs-root
+*.model
+*.log

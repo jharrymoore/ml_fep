@@ -99,8 +99,6 @@ class NonEquilibriumSwitching:
         def update_lambda():
             next(self.integrator.atoms.calc.lambda_schedule)
 
-        def recompute_nl():
-            self.integrator.atoms.calc.update_nl()
 
         def print_traj():
             current_time = time.time()
@@ -182,7 +180,7 @@ class NonEquilibriumSwitching:
 
         self.integrator.attach(write_frame, interval=self.report_interval)
         self.integrator.attach(print_traj, interval=1)
-        self.integrator.attach(recompute_nl, interval=1)
+        # self.integrator.attach(recompute_nl, interval=1)
         if self.integrator.atoms.calc.lambda_schedule.delta != 0:
             self.integrator.attach(update_lambda, interval=1)
 

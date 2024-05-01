@@ -11,7 +11,7 @@ import torch
 import time
 from e3nn.util import jit
 import numpy as np
-from mace_fep.data import AtomicData
+from mace.data import AtomicData
 from mace import data
 from mace.data import get_neighborhood
 
@@ -37,6 +37,7 @@ class NEQ_MACE_AFE_Calculator_NEW(Calculator):
         Calculator.__init__(self, **kwargs)
         self.results = {}
         self.model = jit.script(torch.load(f=model_path, map_location=device))
+        self.model.to(device)
         self.r_max = float(self.model.r_max)
         self.lambda_schedule = lambda_schedule
         self.device = torch_tools.init_device(device)
@@ -48,7 +49,7 @@ class NEQ_MACE_AFE_Calculator_NEW(Calculator):
         torch_tools.set_default_dtype(default_dtype)
         self.step_counter = 0
         self.nl_cache = []
-        self.decouple_indices=decouple_indices
+        self.decouple_indices=torch.tensor(list(decouple_indices)).to(self.device)
         
     # pylint: disable=dangerous-default-value
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
@@ -83,25 +84,17 @@ class NEQ_MACE_AFE_Calculator_NEW(Calculator):
             drop_last=False,
         )
         batch = next(iter(data_loader)).to(self.device)
-        
-        out = self.model(batch.to_dict(), compute_stress=False, lmbda=self.lambda_schedule.output_lambda, decouple_indices=self.decouple_indices)
+        out = self.model(batch.to_dict(), compute_stress=False, lmbda=torch.tensor(float(self.lambda_schedule.output_lambda)).to(self.device), decouple_indices=self.decouple_indices)
         energy = out["interaction_energy"].detach().cpu().item() * self.energy_units_to_eV
         forces = out["forces"].detach().cpu().numpy() * self.energy_units_to_eV / self.length_units_to_A
-        dhdl = out["dhdl"].detach().cpu().numpy() * self.energy_units_to_eV
+        dhdl = out["dhdl"].detach().cpu().item() * self.energy_units_to_eV
         # attach to internal atoms object.  These should still be accessible after the loop
       
 
-        stateA_decoupled_forces = np.concatenate(
-            (stateA_solute.arrays["forces"], solvent_atoms.arrays["forces"]),
-            axis=0,
-        )
-        dHdL = stateA.info["energy"] - (stateA_solute.info["energy"] + solvent_atoms.info["energy"])
-        if self.step_counter % 2 == 0:
-            logger.debug(f"dH/dL: {dHdL}")
 
         self.results = {
             "energy": energy,
-            "free_energy": dHdL,
+            "free_energy": dhdl,
             "forces":forces,
            }
 
