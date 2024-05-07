@@ -88,10 +88,14 @@ def main():
         else:
             delta_lambda = 1.0 / args.steps if not args.reverse else -1.0 / args.steps
         logger.info(f"Delta lambda: {delta_lambda}")
-        lambda_schedule = LambdaSchedule(start=last_recorded_step,
-                                     delta=delta_lambda,
-                                     n_steps=steps_remaining,
-                                     use_ssc=args.use_ssc)
+        lambda_schedule = LambdaSchedule(
+            last_step=last_recorded_step,
+            delta=delta_lambda,
+            total_steps=args.steps,
+            n_steps=steps_remaining,
+            reverse=args.reverse,
+            use_ssc=args.use_ssc,
+        )
         fep_calc = NEQ_MACE_AFE_Calculator_NEW(
             model_path=args.model_path,
             decouple_indices=ligA_idx,
