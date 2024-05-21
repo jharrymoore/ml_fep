@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 logger = logging.getLogger("mace_fep")
 
@@ -12,6 +13,7 @@ class LambdaSchedule:
         reverse: bool,
         n_steps: int,
         use_ssc: bool,
+        lambda_val: Optional[float] = None
     ):
         self.last_step = last_step
         self.delta = delta
@@ -22,7 +24,7 @@ class LambdaSchedule:
             self.last_step / total_steps
             if not reverse
             else 1 - self.last_step / total_steps
-        )
+        ) if lambda_val is None else lambda_val
         self.transform = self.ssc_lambda if use_ssc else self.linear
         self.output_lambda = self.transform(self.current_lambda)
 

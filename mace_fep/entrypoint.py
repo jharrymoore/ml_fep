@@ -82,6 +82,8 @@ def main():
     atoms, last_recorded_step = setup_atoms(args.restart, args.file, args.output)
     if args.mode == "NEQ":
         # atoms, last_recorded_step = setup_atoms(args.restart, args.file, args.output)
+        if args.lambdas is not None:
+            assert len(lambdas) == 1, "Only one lambda value can be specified for NEQ"
         steps_remaining = args.steps - last_recorded_step
         if args.equilibrate:
             delta_lambda = 0.0
@@ -95,6 +97,7 @@ def main():
             n_steps=steps_remaining,
             reverse=args.reverse,
             use_ssc=args.use_ssc,
+            lambda_val=args.lambdas[0]
         )
         fep_calc = NEQ_MACE_AFE_Calculator_NEW(
             model_path=args.model_path,
